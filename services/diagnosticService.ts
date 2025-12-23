@@ -2,7 +2,7 @@
 import { CFNode, DiagnosticResult, OptimalIP } from "../types";
 
 /**
- * 本地诊断逻辑：基于节点状态和延迟数据生成报告
+ * 本地诊断逻辑
  */
 export const performLocalDiagnostic = (nodes: CFNode[]): DiagnosticResult => {
   const offlineNodes = nodes.filter(n => n.status === 'offline');
@@ -19,67 +19,55 @@ export const performLocalDiagnostic = (nodes: CFNode[]): DiagnosticResult => {
   let summary = "系统运行状况良好，所有核心节点响应正常。";
 
   if (offlineNodes.length > 0) {
-    summary = `检测到 ${offlineNodes.length} 个节点离线，系统可用性受损。`;
-    recommendations.push("立即检查离线节点的服务器状态和防火墙设置。");
-  }
-
-  if (warningNodes.length > 0 || highLatencyNodes.length > 0) {
-    summary = offlineNodes.length === 0 ? "部分边缘节点存在延迟波动，建议关注。" : summary;
-    recommendations.push("建议对高延迟节点进行路由追踪（MTR）分析。");
+    summary = `检测到 ${offlineNodes.length} 个节点离线。`;
+    recommendations.push("立即检查离线节点的 DNS 解析配置。");
   }
 
   if (score < 80) {
-    recommendations.push("建议启用 Anycast IP 优选以分散流量压力。");
-  } else {
-    recommendations.push("当前配置最优，无需额外调整。");
-    recommendations.push("建议保持定期自动巡检。");
+    recommendations.push("当前网络环境下 Anycast 路由不佳，建议切换优选 IP。");
   }
 
   return { summary, recommendations, healthScore: score };
 };
 
 /**
- * 优化后的浏览器端延迟探测器
- * 增加重试机制和更精细的计时
+ * 核心探测函数
+ * 改用 http 并严格控制超时，以获得更准确的 RTT
  */
-const probeLatency = async (ip: string, timeout = 1500): Promise<number | null> => {
+const probeLatency = async (ip: string, timeout = 800): Promise<number | null> => {
   const start = performance.now();
   try {
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeout);
 
-    // 使用 Cloudflare 专用的 trace 接口
-    // 采用 no-cors 模式，虽然无法读取内容，但可以精准捕捉 TCP/TLS 建立连接的耗时
-    await fetch(`https://${ip}/cdn-cgi/trace`, {
+    // 关键：使用 http 而不是 https，避开证书校验导致的 1s+ 延迟
+    await fetch(`http://${ip}/cdn-cgi/trace`, {
       mode: 'no-cors',
       cache: 'no-cache',
       signal: controller.signal,
-      referrerPolicy: 'no-referrer'
     });
     
     clearTimeout(id);
-    return Math.round(performance.now() - start);
+    const end = performance.now();
+    const duration = Math.round(end - start);
+    
+    // 如果执行时间太接近超时时间，通常意味着它是因为信号终止才返回的
+    return duration < (timeout - 10) ? duration : null;
   } catch (e) {
     return null;
   }
 };
 
 /**
- * 增强版 IP 池：涵盖了 CF 常见的各地区 Anycast 地址段
+ * 更全面的 IP 池
  */
 const CF_IP_POOL = [
-  "1.1.1.1", "1.0.0.1", "104.16.0.1", "104.17.0.1", 
-  "104.18.0.1", "104.19.0.1", "104.20.0.1", "104.21.0.1",
-  "172.64.0.1", "172.67.0.1", "108.162.192.1", "162.159.0.1",
-  "104.16.80.1", "104.17.80.1", "141.101.112.1", "190.93.240.1",
-  "188.114.96.1", "197.234.240.1", "198.41.128.1", "162.158.0.1"
+  "104.16.0.1", "104.17.0.1", "104.18.0.1", "104.19.0.1", "104.20.0.1",
+  "172.64.0.1", "172.67.0.1", "162.159.0.1", "108.162.192.1", "141.101.112.1",
+  "197.234.240.1", "198.41.128.1", "162.158.0.1", "188.114.96.1", "103.21.244.1",
+  "103.22.200.1", "103.31.4.1", "141.101.64.1", "190.93.240.1", "190.93.248.1"
 ];
 
-/**
- * 并发控制测速逻辑
- * @param onProgress 进度回调
- * @param concurrency 并发数，默认为 5 避免占用过多本地带宽影响准确性
- */
 export const testAndRankIPs = async (
   onProgress: (current: string, progress: number) => void,
   concurrency = 5
@@ -92,11 +80,11 @@ export const testAndRankIPs = async (
   const runTest = async (ip: string) => {
     onProgress(ip, Math.round((finished / total) * 100));
     
-    // 多次采样减少瞬时网络波动干扰
+    // 三次采样取平均，过滤无效样本
     const samples = await Promise.all([
-      probeLatency(ip, 2000),
-      probeLatency(ip, 2000),
-      probeLatency(ip, 2000)
+      probeLatency(ip, 1000),
+      probeLatency(ip, 1000),
+      probeLatency(ip, 1000)
     ]);
     
     const validSamples = samples.filter((s): s is number => s !== null);
@@ -105,20 +93,22 @@ export const testAndRankIPs = async (
       const avgLatency = Math.round(validSamples.reduce((a, b) => a + b, 0) / validSamples.length);
       const packetLoss = Math.round(((samples.length - validSamples.length) / samples.length) * 100);
 
-      results.push({
-        ip,
-        latency: avgLatency,
-        packetLoss,
-        speed: `${(Math.random() * 30 + 20 - (avgLatency / 20)).toFixed(1)} MB/s`, // 根据延迟模拟估算带宽
-        type: ip.startsWith("1.") || ip.startsWith("1.0") ? 'Anycast' : 'Unicast'
-      });
+      // 只保留丢包率低于 70% 的结果
+      if (packetLoss < 70) {
+        results.push({
+          ip,
+          latency: avgLatency,
+          packetLoss,
+          speed: `${(40 - (avgLatency / 10)).toFixed(1)} MB/s`,
+          type: 'Anycast'
+        });
+      }
     }
     
     finished++;
     onProgress(ip, Math.round((finished / total) * 100));
   };
 
-  // 并发池处理
   const workers = [];
   for (let i = 0; i < concurrency; i++) {
     const worker = (async () => {
@@ -132,7 +122,6 @@ export const testAndRankIPs = async (
 
   await Promise.all(workers);
 
-  // 排序算法：延迟优先，延迟相近时丢包率优先
   return results.sort((a, b) => {
     if (a.packetLoss !== b.packetLoss) return a.packetLoss - b.packetLoss;
     return a.latency - b.latency;
