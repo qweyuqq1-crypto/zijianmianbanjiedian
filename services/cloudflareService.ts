@@ -19,19 +19,22 @@ export const cloudflareApi = {
 
     const targetUrl = `${BASE_URL}/zones/${config.zoneId}/dns_records`;
     
-    let finalUrl = targetUrl;
+    // 如果启用代理，实际请求地址是 Worker 地址，目标地址放在 x-target-url 头中
+    let finalRequestUrl = targetUrl;
+    const headers: Record<string, string> = {
+      'Authorization': `Bearer ${config.apiToken}`,
+      'Content-Type': 'application/json'
+    };
+
     if (config.useProxy && config.proxyUrl) {
-      const cleanProxyUrl = config.proxyUrl.endsWith('/') ? config.proxyUrl.slice(0, -1) : config.proxyUrl;
-      finalUrl = `${cleanProxyUrl}?${encodeURIComponent(targetUrl)}`;
+      finalRequestUrl = config.proxyUrl.endsWith('/') ? config.proxyUrl.slice(0, -1) : config.proxyUrl;
+      headers['x-target-url'] = targetUrl; // 核心修复：通过 Header 传递目标 URL
     }
 
     try {
-      const response = await fetch(finalUrl, {
+      const response = await fetch(finalRequestUrl, {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${config.apiToken}`,
-          'Content-Type': 'application/json'
-        },
+        headers: headers,
         body: JSON.stringify({
           type: node.type || 'A',
           name: node.id,
@@ -44,21 +47,23 @@ export const cloudflareApi = {
       const contentType = response.headers.get("Content-Type") || "";
       if (!contentType.includes("application/json")) {
         const text = await response.text();
-        throw new Error(`后端返回了非 JSON 格式内容 (${response.status}): ${text.slice(0, 100)}...`);
+        // 如果是 405，很有可能是请求被 Worker 拦截或者转发路径不对
+        const errorDesc = response.status === 405 ? "Method Not Allowed (请确保 Worker 源码已更新为 Header 转发版)" : `非 JSON 响应`;
+        throw new Error(`${errorDesc} (状态码 ${response.status}): ${text.slice(0, 150)}...`);
       }
 
       const data = await response.json();
 
       if (!response.ok || !data.success) {
-        // 如果是 Cloudflare 报错，提取具体错误信息
         const errorMsg = data.errors?.map((e: any) => e.message).join(", ") || `API 错误 (${response.status})`;
-        throw new Error(`Cloudflare: ${errorMsg}`);
+        throw new Error(`Cloudflare API: ${errorMsg}`);
       }
 
       return data;
     } catch (err: any) {
+      // 捕获各种网络或解析错误
       if (err.message.includes("Unexpected end of JSON input")) {
-        throw new Error("解析失败：后端返回了空响应。请检查子域名是否包含特殊字符，或更新 Worker 源码。");
+        throw new Error("后端返回了空响应，请确认子域名不包含中文或特殊字符。");
       }
       throw err;
     }
