@@ -10,6 +10,7 @@ export default defineConfig({
       CF_API_TOKEN: JSON.stringify(process.env.CF_API_TOKEN),
       CF_ZONE_ID: JSON.stringify(process.env.CF_ZONE_ID),
       CF_DOMAIN: JSON.stringify(process.env.CF_DOMAIN),
+      CF_PROXY_URL: JSON.stringify(process.env.CF_PROXY_URL),
     }
   }
 });

@@ -5,7 +5,7 @@ import {
   CheckCircle2, Copy, RefreshCw, Trophy, 
   XCircle, Save, Cloud, BrainCircuit, Trash2, MapPin, Loader2,
   Server, Cpu, ArrowUpRight, HelpCircle, ToggleLeft, ToggleRight,
-  AlertCircle, ExternalLink, Code2, Terminal
+  AlertCircle, ExternalLink, Code2, Terminal, Info
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { MOCK_NODES } from './constants';
@@ -24,17 +24,23 @@ export default {
     const url = new URL(request.url);
     const targetUrl = url.search.slice(1); 
     if (!targetUrl) return new Response("Missing Target URL", { status: 400 });
+    
     const newRequest = new Request(targetUrl, {
       method: request.method,
       headers: request.headers,
       body: request.body
     });
-    const response = await fetch(newRequest);
-    const newResponse = new Response(response.body, response);
-    newResponse.headers.set("Access-Control-Allow-Origin", "*");
-    newResponse.headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    newResponse.headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    return newResponse;
+
+    try {
+      const response = await fetch(newRequest);
+      const newResponse = new Response(response.body, response);
+      newResponse.headers.set("Access-Control-Allow-Origin", "*");
+      newResponse.headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      newResponse.headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+      return newResponse;
+    } catch (e) {
+      return new Response("Proxy Error: " + e.message, { status: 500 });
+    }
   }
 };`;
 
@@ -48,27 +54,26 @@ const App: React.FC = () => {
   const [selectedNode, setSelectedNode] = useState<CFNode | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
-  // 强化后的配置初始化逻辑
+  // 强化配置加载，支持从系统变量直接读取 Proxy URL
   const [cfConfig, setCfConfig] = useState<CFConfig>(() => {
     const saved = localStorage.getItem('cv_config');
-    // 获取环境变量作为回退默认值 (Vite 会在构建时注入这些)
     const envDefaults = {
       apiToken: process.env.CF_API_TOKEN || '',
       zoneId: process.env.CF_ZONE_ID || '',
       domain: process.env.CF_DOMAIN || '',
-      useProxy: true,
-      proxyUrl: ''
+      proxyUrl: process.env.CF_PROXY_URL || '',
+      useProxy: true
     };
 
     if (saved) {
       const parsed = JSON.parse(saved);
-      // 如果本地存储里的值为空，但环境变量里有值，则使用环境变量的值
       return {
         ...envDefaults,
         ...parsed,
         apiToken: parsed.apiToken || envDefaults.apiToken,
         zoneId: parsed.zoneId || envDefaults.zoneId,
         domain: parsed.domain || envDefaults.domain,
+        proxyUrl: parsed.proxyUrl || envDefaults.proxyUrl
       };
     }
     return envDefaults;
@@ -106,6 +111,13 @@ const App: React.FC = () => {
 
   const handleConfirmDeploy = async () => {
     if (!newNodeData.id || !newNodeData.name) return alert("请完整填写子域名和名称");
+    
+    // 实机部署必须检查代理
+    if (!useSimulation && !cfConfig.proxyUrl) {
+      setDeployLogs(["[ERROR] 未设置代理 URL！", "浏览器无法直接连接 CF API，请在[系统配置]中部署并填写 Worker 代理地址。"]);
+      return;
+    }
+
     setDeployLogs(["[INFO] 正在初始化部署程序...", `[INFO] 目标子域名: ${newNodeData.id}.${cfConfig.domain}`]);
     setIsDeploying(true);
 
@@ -148,7 +160,7 @@ const App: React.FC = () => {
 
   const copyWorkerCode = () => {
     navigator.clipboard.writeText(WORKER_PROXY_CODE);
-    alert("Worker 代码已复制！请前往 Cloudflare Workers 部署。");
+    alert("Worker 代码已复制！请前往 Cloudflare Workers 部署，完成后将生成的网址填入下方的【私有代理 URL】");
   };
 
   const renderContentView = () => {
@@ -298,20 +310,26 @@ const App: React.FC = () => {
 
               <div className="bg-slate-900 rounded-[2.5rem] p-10 text-white shadow-xl">
                 <div className="flex justify-between items-center mb-6">
-                   <h2 className="text-2xl font-black">CORS 代理 (必选)</h2>
+                   <h2 className="text-2xl font-black">CORS 中转后端 (关键)</h2>
                    <button onClick={() => setCfConfig({...cfConfig, useProxy: !cfConfig.useProxy})}>
                       {cfConfig.useProxy ? <ToggleRight size={36} className="text-indigo-400" /> : <ToggleLeft size={36} className="text-slate-600" />}
                    </button>
                 </div>
-                <p className="text-sm text-slate-400 leading-relaxed mb-6">
-                  环境变量设置的是 API 凭据，但 **浏览器 CORS 限制** 依然存在。你仍然需要部署并填写右侧的私有代理 URL 才能真正连接 API。
-                </p>
+                <div className="p-4 bg-indigo-900/40 rounded-2xl border border-indigo-500/30 mb-6 flex gap-3">
+                   <Info size={18} className="text-indigo-300 shrink-0 mt-1" />
+                   <p className="text-xs text-slate-300 leading-relaxed">
+                     <b>为什么需要后端?</b> 浏览器禁止直接调用 Cloudflare API。你需要部署下面的 Worker 源码，并将生成的 URL 填入下方，才能解决你遇到的“CORS 错误”。
+                   </p>
+                </div>
                 <div className="mb-6">
-                   <label className="text-[10px] font-black text-slate-500 uppercase mb-2 block">私有代理 URL</label>
-                   <input type="text" value={cfConfig.proxyUrl} onChange={e => setCfConfig({...cfConfig, proxyUrl: e.target.value})} className="w-full bg-slate-800 border border-slate-700 p-4 rounded-2xl text-sm font-mono outline-none text-indigo-400" placeholder="https://your-worker.workers.dev" />
+                   <div className="flex justify-between items-center mb-2">
+                     <label className="text-[10px] font-black text-slate-500 uppercase block">私有代理 URL</label>
+                     {process.env.CF_PROXY_URL && <span className="text-[9px] font-bold bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full">已从环境加载</span>}
+                   </div>
+                   <input type="text" value={cfConfig.proxyUrl} onChange={e => setCfConfig({...cfConfig, proxyUrl: e.target.value})} className="w-full bg-slate-800 border border-slate-700 p-4 rounded-2xl text-sm font-mono outline-none text-indigo-400 focus:border-indigo-500 transition-all" placeholder="https://your-worker.workers.dev" />
                 </div>
                 <button onClick={copyWorkerCode} className="w-full py-4 bg-white/10 hover:bg-white/20 rounded-2xl font-bold flex items-center justify-center gap-2 border border-white/10 transition-all text-sm">
-                   <Code2 size={18} /> 复制代理 Worker 源码
+                   <Code2 size={18} /> 复制代理 Worker 源码 (后端)
                 </button>
               </div>
             </div>
@@ -396,6 +414,14 @@ const App: React.FC = () => {
                          {useSimulation ? <ToggleRight size={24} className="text-amber-600" /> : <ToggleLeft size={24} className="text-slate-300" />}
                       </button>
                    </div>
+                   
+                   {!cfConfig.proxyUrl && !useSimulation && (
+                     <div className="p-4 bg-rose-50 rounded-2xl border border-rose-100 flex gap-3">
+                        <AlertCircle size={18} className="text-rose-600 shrink-0" />
+                        <p className="text-[10px] text-rose-700 font-bold leading-tight">检测到未配置后端代理 URL。如果不配置，部署将因 CORS 限制而失败。请先在[系统配置]中设置。</p>
+                     </div>
+                   )}
+
                    <button 
                      onClick={handleConfirmDeploy} 
                      disabled={isDeploying}
