@@ -46,5 +46,7 @@ export interface OptimalIP {
 export interface CFConfig {
   apiToken: string;
   zoneId: string;
-  domain: string; // 新增：用于连接的域名
+  domain: string;
+  useProxy: boolean;
+  proxyUrl: string;
 }
