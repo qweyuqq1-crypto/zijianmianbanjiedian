@@ -1,0 +1,7 @@
+{
+  "name": "CloudVista - CF 节点可视化面板",
+  "description": "一个专业级别的 Cloudflare 节点监控与可视化分析系统，支持全球节点分布展示、实时流量统计及 AI 智能诊断。",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
