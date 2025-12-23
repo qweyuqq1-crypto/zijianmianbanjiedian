@@ -387,11 +387,11 @@ const App: React.FC = () => {
           {sidebarOpen && <h1 className="text-xl font-black text-slate-800">CloudVista</h1>}
         </div>
         <nav className="flex-1 px-4 space-y-2">
-          <NavItem icon={<LayoutDashboard size={20} />} label="控制中心" active={activeView === 'dashboard'} onClick={() => setActiveView('dashboard'} sidebarOpen={sidebarOpen} />
-          <NavItem icon={<Globe size={20} />} label="边缘解析" active={activeView === 'network'} onClick={() => setActiveView('network'} sidebarOpen={sidebarOpen} />
-          <NavItem icon={<FlaskConical size={20} />} label="优选实验室" active={activeView === 'lab'} onClick={() => setActiveView('lab'} sidebarOpen={sidebarOpen} />
+          <NavItem icon={<LayoutDashboard size={20} />} label="控制中心" active={activeView === 'dashboard'} onClick={() => setActiveView('dashboard')} sidebarOpen={sidebarOpen} />
+          <NavItem icon={<Globe size={20} />} label="边缘解析" active={activeView === 'network'} onClick={() => setActiveView('network')} sidebarOpen={sidebarOpen} />
+          <NavItem icon={<FlaskConical size={20} />} label="优选实验室" active={activeView === 'lab'} onClick={() => setActiveView('lab')} sidebarOpen={sidebarOpen} />
           <div className="pt-4 border-t border-slate-50">
-            <NavItem icon={<Settings size={20} />} label="系统配置" active={activeView === 'settings'} onClick={() => setActiveView('settings'} sidebarOpen={sidebarOpen} />
+            <NavItem icon={<Settings size={20} />} label="系统配置" active={activeView === 'settings'} onClick={() => setActiveView('settings')} sidebarOpen={sidebarOpen} />
           </div>
         </nav>
       </aside>
