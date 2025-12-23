@@ -14,17 +14,15 @@ export const cloudflareApi = {
     }
 
     if (!config.apiToken || !config.zoneId) {
-      throw new Error("配置缺失：请先在设置中填写 API Token 和 Zone ID");
+      throw new Error("配置缺失：请在设置中填写 API Token 和 Zone ID");
     }
 
-    // 默认请求地址
     const targetUrl = `${BASE_URL}/zones/${config.zoneId}/dns_records`;
     
-    // 智能拼接 URL：去掉 proxyUrl 末尾的斜杠，并在拼接时使用 ? 分割
     let finalUrl = targetUrl;
     if (config.useProxy && config.proxyUrl) {
       const cleanProxyUrl = config.proxyUrl.endsWith('/') ? config.proxyUrl.slice(0, -1) : config.proxyUrl;
-      finalUrl = `${cleanProxyUrl}?${targetUrl}`;
+      finalUrl = `${cleanProxyUrl}?${encodeURIComponent(targetUrl)}`;
     }
 
     try {
@@ -43,18 +41,24 @@ export const cloudflareApi = {
         })
       });
 
+      const contentType = response.headers.get("Content-Type") || "";
+      if (!contentType.includes("application/json")) {
+        const text = await response.text();
+        throw new Error(`后端返回了非 JSON 格式内容 (${response.status}): ${text.slice(0, 100)}...`);
+      }
+
       const data = await response.json();
 
       if (!response.ok || !data.success) {
-        const errorMsg = data.errors?.[0]?.message || `HTTP 错误: ${response.status}`;
-        throw new Error(`Cloudflare API 拒绝请求: ${errorMsg}`);
+        // 如果是 Cloudflare 报错，提取具体错误信息
+        const errorMsg = data.errors?.map((e: any) => e.message).join(", ") || `API 错误 (${response.status})`;
+        throw new Error(`Cloudflare: ${errorMsg}`);
       }
 
       return data;
     } catch (err: any) {
-      // 捕捉网络层面的报错，通常是 CORS
-      if (err.name === 'TypeError' && err.message === 'Failed to fetch') {
-        throw new Error("连接后端失败。请确保你的 Worker 代码已更新到最新版（处理了 OPTIONS 请求），且 URL 正确。");
+      if (err.message.includes("Unexpected end of JSON input")) {
+        throw new Error("解析失败：后端返回了空响应。请检查子域名是否包含特殊字符，或更新 Worker 源码。");
       }
       throw err;
     }
