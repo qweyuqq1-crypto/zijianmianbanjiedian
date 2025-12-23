@@ -20,14 +20,24 @@ import { cloudflareApi } from './services/cloudflareService';
 type ViewType = 'dashboard' | 'network' | 'lab' | 'security' | 'settings';
 
 const App: React.FC = () => {
-  // 环境变量检测
-  const envConfig = {
+  // 环境变量探测
+  const envConfig = useMemo(() => ({
     apiToken: process.env.CF_API_TOKEN || '',
     zoneId: process.env.CF_ZONE_ID || '',
     domain: process.env.CF_DOMAIN || ''
-  };
+  }), []);
 
+  // 只要有核心 Token 和 ZoneID 就认为受系统管理
   const isSystemManaged = !!(envConfig.apiToken && envConfig.zoneId);
+
+  // 调试信息：仅在开发模式显示，帮助确认变量是否注入成功
+  useEffect(() => {
+    if (isSystemManaged) {
+      console.log("CloudVista: 检测到系统机密配置已生效 (Managed by Environment Variables)");
+    } else {
+      console.warn("CloudVista: 未检测到环境变量，将回退至手动配置模式");
+    }
+  }, [isSystemManaged]);
 
   // 状态管理
   const [activeView, setActiveView] = useState<ViewType>('dashboard');
@@ -48,28 +58,24 @@ const App: React.FC = () => {
   const [probeProgress, setProbeProgress] = useState({ currentIP: '', percent: 0 });
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
 
-  // 配置管理 (本地输入部分)
+  // 本地配置（仅当环境变量缺失时作为补充）
   const [localCfConfig, setLocalCfConfig] = useState<CFConfig>(() => {
     const saved = localStorage.getItem('cv_config');
     return saved ? JSON.parse(saved) : { apiToken: '', zoneId: '', domain: '' };
   });
 
-  // 最终使用的配置 (环境变量优先)
+  // 最终生效配置（环境变量优先级最高）
   const activeCfConfig = useMemo(() => ({
     apiToken: envConfig.apiToken || localCfConfig.apiToken,
     zoneId: envConfig.zoneId || localCfConfig.zoneId,
     domain: envConfig.domain || localCfConfig.domain
   }), [localCfConfig, envConfig]);
 
-  // 搜索
   const [searchQuery, setSearchQuery] = useState('');
-
-  // 状态显示控制
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
   const [newNodeData, setNewNodeData] = useState({ id: '', name: '' });
 
-  // 数据持久化
   useEffect(() => { localStorage.setItem('cv_nodes', JSON.stringify(nodes)); }, [nodes]);
   useEffect(() => { localStorage.setItem('cv_config', JSON.stringify(localCfConfig)); }, [localCfConfig]);
 
@@ -110,12 +116,18 @@ const App: React.FC = () => {
 
   const handleConfirmDeploy = async () => {
     if (!newNodeData.id || !newNodeData.name) {
-      alert("请填写完整信息");
+      alert("请填写节点 ID 和名称");
       return;
     }
 
+    // 严格检查配置是否可用
     if (!activeCfConfig.apiToken || !activeCfConfig.zoneId || !activeCfConfig.domain) {
-      alert("请先前往“系统配置”完成 Cloudflare 认证配置");
+      const missing = [];
+      if (!activeCfConfig.apiToken) missing.push("API Token");
+      if (!activeCfConfig.zoneId) missing.push("Zone ID");
+      if (!activeCfConfig.domain) missing.push("根域名");
+      
+      alert(`配置不完整，缺少: ${missing.join(', ')}。\n\n提示：如果您已经在 Cloudflare 后台设置了机密，请确保已重新执行项目部署。`);
       setActiveView('settings');
       setIsCreateModalOpen(false);
       return;
@@ -145,7 +157,7 @@ const App: React.FC = () => {
       setIsCreateModalOpen(false);
       setNewNodeData({ id: '', name: '' });
       setSelectedNode(newNode);
-      alert("节点已成功部署至 Cloudflare 边缘网络！");
+      alert("🎉 节点已成功部署至 Cloudflare 网络！");
     } catch (error: any) {
       alert(`部署失败: ${error.message}`);
     } finally {
@@ -154,7 +166,7 @@ const App: React.FC = () => {
   };
 
   const handleDeleteNode = (id: string) => {
-    if (confirm('确定要删除此节点吗？')) {
+    if (confirm('确定要移除此节点吗？(这不会删除 Cloudflare 上的 DNS 记录)')) {
       setNodes(nodes.filter(n => n.id !== id));
       setSelectedNode(null);
     }
@@ -229,7 +241,6 @@ const App: React.FC = () => {
           </div>
         );
       case 'network':
-        const filteredNodes = nodes.filter(n => n.name.toLowerCase().includes(searchQuery.toLowerCase()) || n.id.includes(searchQuery.toUpperCase()));
         return (
           <div className="animate-in fade-in slide-in-from-right-4 duration-500 space-y-8">
             <div className="bg-white rounded-[2.5rem] p-8 border border-slate-200 shadow-sm">
@@ -336,8 +347,8 @@ const App: React.FC = () => {
                       <p className="text-slate-500 text-sm mt-1">配置 Cloudflare API 以启用云端同步功能</p>
                    </div>
                    {isSystemManaged && (
-                     <div className="px-3 py-1 bg-emerald-50 text-emerald-600 rounded-lg text-[10px] font-black uppercase flex items-center gap-1 border border-emerald-100">
-                        <ShieldCheck size={12} /> 系统机密已启用
+                     <div className="px-3 py-1 bg-emerald-50 text-emerald-600 rounded-lg text-[10px] font-black uppercase flex items-center gap-1 border border-emerald-100 shadow-sm">
+                        <ShieldCheck size={12} /> 机密已托管
                      </div>
                    )}
                 </div>
@@ -346,51 +357,60 @@ const App: React.FC = () => {
                    <div className="space-y-4">
                       <label className="text-xs font-black text-slate-400 uppercase ml-1 flex items-center justify-between">
                         <span>Cloudflare API 令牌</span>
-                        {process.env.CF_API_TOKEN && <span className="text-[10px] text-emerald-500">已由环境变量提供</span>}
+                        {envConfig.apiToken && <span className="text-[10px] text-emerald-500">环境变量注入</span>}
                       </label>
                       <div className="relative">
                         <input 
-                          type="password" placeholder={process.env.CF_API_TOKEN ? "******** (系统托管)" : "请输入您的 CF_API_TOKEN"}
-                          disabled={!!process.env.CF_API_TOKEN}
-                          className={`w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none font-mono ${process.env.CF_API_TOKEN ? 'opacity-60 cursor-not-allowed' : ''}`}
+                          type="password" placeholder={envConfig.apiToken ? "******** (系统安全托管)" : "请输入您的 CF_API_TOKEN"}
+                          disabled={!!envConfig.apiToken}
+                          className={`w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none font-mono ${envConfig.apiToken ? 'opacity-60 cursor-not-allowed bg-slate-100' : ''}`}
                           value={localCfConfig.apiToken} onChange={e => setLocalCfConfig({...localCfConfig, apiToken: e.target.value})}
                         />
                         <Key className="absolute right-5 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
                       </div>
-                      {!process.env.CF_API_TOKEN && <p className="text-[10px] text-slate-400 px-1">安全提示：建议在 Cloudflare Pages 面板中配置环境变量 CF_API_TOKEN</p>}
                    </div>
 
                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       <div className="space-y-4">
                         <label className="text-xs font-black text-slate-400 uppercase ml-1 flex items-center justify-between">
                            <span>区域 ID (Zone ID)</span>
-                           {process.env.CF_ZONE_ID && <span className="text-emerald-500">托管</span>}
+                           {envConfig.zoneId && <span className="text-emerald-500">托管</span>}
                         </label>
                         <input 
-                          type="text" placeholder={process.env.CF_ZONE_ID ? "系统托管" : "CF 域名面板获取"}
-                          disabled={!!process.env.CF_ZONE_ID}
-                          className={`w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none font-mono ${process.env.CF_ZONE_ID ? 'opacity-60 cursor-not-allowed' : ''}`}
+                          type="text" placeholder={envConfig.zoneId ? "由系统自动提供" : "CF 域名面板获取"}
+                          disabled={!!envConfig.zoneId}
+                          className={`w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none font-mono ${envConfig.zoneId ? 'opacity-60 cursor-not-allowed bg-slate-100' : ''}`}
                           value={localCfConfig.zoneId} onChange={e => setLocalCfConfig({...localCfConfig, zoneId: e.target.value})}
                         />
                       </div>
                       <div className="space-y-4">
                         <label className="text-xs font-black text-slate-400 uppercase ml-1 flex items-center justify-between">
                            <span>加速根域名</span>
-                           {process.env.CF_DOMAIN && <span className="text-emerald-500">托管</span>}
+                           {envConfig.domain && <span className="text-emerald-500">托管</span>}
                         </label>
                         <input 
-                          type="text" placeholder={process.env.CF_DOMAIN ? process.env.CF_DOMAIN : "例如: example.com"}
-                          disabled={!!process.env.CF_DOMAIN}
-                          className={`w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none font-mono ${process.env.CF_DOMAIN ? 'opacity-60 cursor-not-allowed' : ''}`}
+                          type="text" placeholder={envConfig.domain ? envConfig.domain : "例如: myproxy.com"}
+                          disabled={!!envConfig.domain}
+                          className={`w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none font-mono ${envConfig.domain ? 'opacity-60 cursor-not-allowed bg-slate-100' : ''}`}
                           value={localCfConfig.domain} onChange={e => setLocalCfConfig({...localCfConfig, domain: e.target.value})}
                         />
                       </div>
                    </div>
 
-                   {!isSystemManaged && (
-                     <button onClick={() => alert('设置已加密保存至本地')} className="w-full py-4 bg-slate-900 text-white rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-slate-800 transition-all">
-                       <Save size={18} /> 保存本地配置
+                   {!isSystemManaged ? (
+                     <button onClick={() => alert('设置已保存至本地存储')} className="w-full py-4 bg-slate-900 text-white rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-slate-800 transition-all">
+                       <Save size={18} /> 保存本地手动配置
                      </button>
+                   ) : (
+                     <div className="p-4 bg-indigo-50 border border-indigo-100 rounded-2xl flex items-start gap-3">
+                        <Shield size={18} className="text-indigo-600 mt-1 shrink-0" />
+                        <div>
+                           <p className="text-xs font-bold text-indigo-900">安全提示</p>
+                           <p className="text-[10px] text-indigo-700 leading-relaxed mt-1">
+                             当前正在使用系统级机密配置。如果您需要修改这些值，请前往 Cloudflare Pages 控制台的环境变量设置中更新，并点击“保存并重新部署”。
+                           </p>
+                        </div>
+                     </div>
                    )}
                 </div>
              </div>
@@ -452,13 +472,13 @@ const App: React.FC = () => {
              </div>
              <div className="space-y-6">
                 <div>
-                  <label className="text-xs font-black text-slate-400 uppercase mb-2 block">节点 ID (DNS 前缀)</label>
-                  <input className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm outline-none focus:ring-2 focus:ring-indigo-500" value={newNodeData.id} onChange={e => setNewNodeData({...newNodeData, id: e.target.value})} placeholder="例如: us-01" />
-                  <p className="text-[10px] text-slate-400 mt-1">最终域名: {newNodeData.id || 'node'}.{activeCfConfig.domain || 'domain.com'}</p>
+                  <label className="text-xs font-black text-slate-400 uppercase mb-2 block">节点 ID (子域前缀)</label>
+                  <input className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm outline-none focus:ring-2 focus:ring-indigo-500" value={newNodeData.id} onChange={e => setNewNodeData({...newNodeData, id: e.target.value})} placeholder="例如: hk-01" />
+                  <p className="text-[10px] text-slate-400 mt-1">目标: {newNodeData.id || 'node'}.{activeCfConfig.domain || 'domain.com'}</p>
                 </div>
                 <div>
-                  <label className="text-xs font-black text-slate-400 uppercase mb-2 block">显示名称</label>
-                  <input className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm outline-none focus:ring-2 focus:ring-indigo-500" value={newNodeData.name} onChange={e => setNewNodeData({...newNodeData, name: e.target.value})} placeholder="例如: 洛杉矶加速" />
+                  <label className="text-xs font-black text-slate-400 uppercase mb-2 block">名称</label>
+                  <input className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm outline-none focus:ring-2 focus:ring-indigo-500" value={newNodeData.name} onChange={e => setNewNodeData({...newNodeData, name: e.target.value})} placeholder="例如: 香港 PCCW 加速" />
                 </div>
                 <div className="p-4 bg-indigo-50 rounded-2xl border border-indigo-100">
                   <p className="text-[10px] font-black text-indigo-600 uppercase mb-1">自动绑定优选 IP</p>
@@ -472,7 +492,7 @@ const App: React.FC = () => {
                   className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 shadow-xl shadow-indigo-200"
                 >
                   {isDeploying ? <Loader2 className="animate-spin" /> : <ShieldCheck size={18} />}
-                  {isDeploying ? '正在同步云端...' : '立即部署'}
+                  {isDeploying ? '正在同步 Cloudflare...' : '立即部署'}
                 </button>
              </div>
           </div>
@@ -484,7 +504,7 @@ const App: React.FC = () => {
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[110] flex items-center justify-end">
           <div className="h-full w-full max-w-md bg-white shadow-2xl animate-in slide-in-from-right duration-300 overflow-y-auto custom-scrollbar">
             <div className="p-8 border-b border-slate-100 flex justify-between items-center sticky top-0 bg-white z-10">
-              <h3 className="text-xl font-black text-slate-800 flex items-center gap-2"><Globe className="text-indigo-600" /> 节点详情</h3>
+              <h3 className="text-xl font-black text-slate-800 flex items-center gap-2"><Globe className="text-indigo-600" /> 节点参数</h3>
               <button onClick={() => setSelectedNode(null)} className="p-2 hover:bg-slate-100 rounded-full transition-colors"><XCircle size={24} className="text-slate-300" /></button>
             </div>
             
@@ -507,23 +527,23 @@ const App: React.FC = () => {
                     <QRCodeSVG value={generateConfigLink(selectedNode)} size={180} level="H" />
                  </div>
                  <h4 className="text-white font-black text-lg mb-1">{selectedNode.name}</h4>
-                 <p className="text-slate-400 text-[10px] mb-6">UUID: de305d54-75b4-431b-adb2-eb6b9e546014</p>
+                 <p className="text-slate-400 text-[10px] mb-6 truncate max-w-xs">{generateConfigLink(selectedNode).substring(0, 40)}...</p>
                  <button 
                    onClick={() => copyToClipboard(generateConfigLink(selectedNode))}
                    className="w-full py-3 bg-indigo-600 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 hover:bg-indigo-500 transition-all"
                  >
                    {copyStatus === generateConfigLink(selectedNode) ? <CheckCircle2 size={14} /> : <Copy size={14} />}
-                   {copyStatus === generateConfigLink(selectedNode) ? '链接已复制' : '复制 VLESS 链接'}
+                   {copyStatus === generateConfigLink(selectedNode) ? '已复制到剪贴板' : '复制 VLESS 链接'}
                  </button>
               </div>
 
               <div className="space-y-4">
-                 <h5 className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">技术参数</h5>
+                 <h5 className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">核心连接参数</h5>
                  <div className="space-y-3">
-                    <ParamItem label="连接 IP" value={selectedNode.location} />
-                    <ParamItem label="SNI/Host" value={selectedNode.source === 'mock' ? 'cloudvista.xyz' : `${selectedNode.id}.${activeCfConfig.domain}`} />
-                    <ParamItem label="端口" value="443 (TLS)" />
-                    <ParamItem label="路径" value="/?ed=2048" />
+                    <ParamItem label="Anycast IP" value={selectedNode.location} />
+                    <ParamItem label="SNI / Host" value={selectedNode.source === 'mock' ? 'cloudvista.xyz' : `${selectedNode.id}.${activeCfConfig.domain}`} />
+                    <ParamItem label="端口" value="443" />
+                    <ParamItem label="加密/传输" value="TLS / WS" />
                  </div>
               </div>
 
@@ -532,7 +552,7 @@ const App: React.FC = () => {
                    onClick={() => handleDeleteNode(selectedNode.id)}
                    className="w-full py-4 bg-rose-50 text-rose-600 rounded-2xl text-xs font-bold flex items-center justify-center gap-2 hover:bg-rose-100 transition-all"
                  >
-                   <Trash2 size={16} /> 删除节点
+                   <Trash2 size={16} /> 从面板移除此节点
                  </button>
               </div>
             </div>
