@@ -18,54 +18,73 @@ import { cloudflareApi } from './services/cloudflareService';
 
 type ViewType = 'dashboard' | 'network' | 'lab' | 'settings';
 
-// 终极版 Worker 代码：针对 API 报错转发进行了深度优化，确保报错信息也能以 JSON 形式安全传达
+// 终极稳定版 Worker 源码
 const WORKER_PROXY_CODE = `
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const targetUrl = url.search.slice(1); 
+    // 关键修复：必须进行 decodeURIComponent，否则 fetch 无法识别编码后的 URL
+    let targetUrl = "";
+    try {
+      targetUrl = decodeURIComponent(url.search.slice(1));
+    } catch(e) {
+      return new Response(JSON.stringify({success:false, message:"Invalid target URL"}), {status:400, headers:{"Content-Type":"application/json","Access-Control-Allow-Origin":"*"}});
+    }
     
+    // 处理预检请求
     if (request.method === 'OPTIONS') {
       return new Response(null, {
         headers: {
           "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
           "Access-Control-Max-Age": "86400",
         }
       });
     }
 
-    if (!targetUrl) return new Response("CloudVista Proxy Ready.", { status: 200 });
-    
-    // 过滤掉可能干扰 Cloudflare API 的敏感 Header
-    const filteredHeaders = new Headers();
-    const forbiddenHeaders = ['host', 'origin', 'referer', 'cf-ray', 'x-forwarded-for'];
-    for (const [key, value] of request.headers.entries()) {
-      if (!forbiddenHeaders.includes(key.toLowerCase())) {
-        filteredHeaders.set(key, value);
-      }
-    }
-
-    try {
-      const response = await fetch(targetUrl, {
-        method: request.method,
-        headers: filteredHeaders,
-        body: request.method !== 'GET' && request.method !== 'HEAD' ? await request.arrayBuffer() : null
+    if (!targetUrl || !targetUrl.startsWith('http')) {
+      return new Response(JSON.stringify({success:false, message:"Ready. Usage: ?https://example.com"}), { 
+        status: 200, 
+        headers: {"Content-Type":"application/json","Access-Control-Allow-Origin":"*"} 
       });
+    }
+    
+    try {
+      // 清洗请求头，只保留必要的，防止 Cloudflare API 拒绝重复或矛盾的头部
+      const newHeaders = new Headers();
+      const allowedHeaders = ['authorization', 'content-type', 'accept', 'user-agent'];
+      for (const [key, value] of request.headers.entries()) {
+        if (allowedHeaders.includes(key.toLowerCase())) {
+          newHeaders.set(key, value);
+        }
+      }
 
-      // 关键点：将 Body 转换为 ArrayBuffer 再重新构造，避免 Stream 传输过程中的意外中断
-      const responseBody = await response.arrayBuffer();
-      const newResponse = new Response(responseBody, {
+      const fetchOptions = {
+        method: request.method,
+        headers: newHeaders,
+        body: (request.method !== 'GET' && request.method !== 'HEAD') ? await request.arrayBuffer() : null,
+        redirect: 'follow'
+      };
+
+      const response = await fetch(targetUrl, fetchOptions);
+      
+      // 读取响应体
+      const responseData = await response.arrayBuffer();
+      
+      return new Response(responseData, {
         status: response.status,
         headers: {
           "Content-Type": response.headers.get("Content-Type") || "application/json",
           "Access-Control-Allow-Origin": "*",
+          "Access-Control-Expose-Headers": "*"
         }
       });
-      return newResponse;
     } catch (e) {
-      return new Response(JSON.stringify({ success: false, errors: [{ message: e.message }] }), { 
+      return new Response(JSON.stringify({ 
+        success: false, 
+        errors: [{ message: "Proxy Error: " + e.message }] 
+      }), { 
         status: 500,
         headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
       });
@@ -98,10 +117,6 @@ const App: React.FC = () => {
       return {
         ...envDefaults,
         ...parsed,
-        apiToken: parsed.apiToken || envDefaults.apiToken,
-        zoneId: parsed.zoneId || envDefaults.zoneId,
-        domain: parsed.domain || envDefaults.domain,
-        proxyUrl: parsed.proxyUrl || envDefaults.proxyUrl
       };
     }
     return envDefaults;
@@ -154,7 +169,6 @@ const App: React.FC = () => {
   }, [nodes]);
 
   const handleConfirmDeploy = async () => {
-    // 自动清洗子域名：只允许英文字母、数字和横杠
     const cleanId = newNodeData.id.replace(/[^a-zA-Z0-9-]/g, '').toLowerCase();
     if (!cleanId) return alert("子域名格式无效，请使用英文字母或数字");
     if (!newNodeData.name) return alert("请填写节点名称");
@@ -186,10 +200,10 @@ const App: React.FC = () => {
         type: 'A'
       };
 
-      setDeployLogs(prev => [...prev, `[WAIT] 正在发送 API 请求至 ${useSimulation ? '本地模拟' : 'Cloudflare'}...`]);
+      setDeployLogs(prev => [...prev, `[WAIT] 正在发送 API 请求...`]);
       await cloudflareApi.createDnsRecord(cfConfig, newNode, useSimulation);
       
-      setDeployLogs(prev => [...prev, "[SUCCESS] 解析已生效，节点已添加至管理列表！"]);
+      setDeployLogs(prev => [...prev, "[SUCCESS] 解析已生效，节点已同步！"]);
       setNodes([newNode, ...nodes]);
       
       setTimeout(() => {
@@ -206,7 +220,7 @@ const App: React.FC = () => {
 
   const copyWorkerCode = () => {
     navigator.clipboard.writeText(WORKER_PROXY_CODE);
-    alert("终极版 Worker 代码已复制！请前往 Cloudflare 覆盖旧代码，这是解决 JSON 报错的关键。");
+    alert("终极稳定版源码已复制！请覆盖旧 Worker 代码。这是解决 405/JSON 报错的唯一方案。");
   };
 
   const renderContentView = () => {
@@ -215,11 +229,11 @@ const App: React.FC = () => {
         return (
           <div className="animate-in fade-in duration-500 space-y-8">
             <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-              <StatCard label="系统平均延迟" value={`${stats.avgLatency}ms`} icon={<Zap size={20} />} trend="-4ms" trendPositive />
-              <StatCard label="在线边缘节点" value={`${stats.onlineCount}/${nodes.length}`} icon={<Server size={20} />} trend={`${nodes.length} 总计`} />
-              <StatCard label="今日解析量" value={`${stats.totalRequests.toLocaleString()}`} icon={<ArrowUpRight size={20} />} trend="+12%" trendPositive />
-              <div className="bg-slate-900 rounded-3xl p-6 text-white relative overflow-hidden shadow-xl shadow-slate-200">
-                 <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">AI 架构健康度</p>
+              <StatCard label="平均延迟" value={`${stats.avgLatency}ms`} icon={<Zap size={20} />} trend="-4ms" trendPositive />
+              <StatCard label="在线节点" value={`${stats.onlineCount}/${nodes.length}`} icon={<Server size={20} />} />
+              <StatCard label="今日解析" value={`${stats.totalRequests.toLocaleString()}`} icon={<ArrowUpRight size={20} />} />
+              <div className="bg-slate-900 rounded-3xl p-6 text-white relative overflow-hidden">
+                 <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">系统评分</p>
                  <h4 className="text-4xl font-black">9.8</h4>
                  <BrainCircuit size={80} className="absolute -bottom-4 -right-4 text-white/5" />
               </div>
@@ -248,7 +262,7 @@ const App: React.FC = () => {
                       <p className="text-xs font-bold text-slate-400 mt-2">{node.latency}ms</p>
                     </div>
                   </div>
-                  <h4 className="text-xl font-black text-slate-800 group-hover:text-indigo-600 transition-colors">{node.name}</h4>
+                  <h4 className="text-xl font-black text-slate-800 group-hover:text-indigo-600">{node.name}</h4>
                   <div className="mt-4 flex items-center gap-2 text-xs font-mono text-slate-500 bg-slate-50 p-3 rounded-xl border border-slate-100">
                     <MapPin size={12} className="text-indigo-400" /> {node.location}
                   </div>
@@ -261,7 +275,7 @@ const App: React.FC = () => {
         return (
           <div className="animate-in fade-in slide-in-from-right-4 duration-500 space-y-8">
              <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <div className="bg-slate-900 rounded-[2.5rem] p-12 text-white relative overflow-hidden shadow-2xl shadow-indigo-200">
+                <div className="bg-slate-900 rounded-[2.5rem] p-12 text-white relative overflow-hidden shadow-2xl">
                    <div className="relative z-10">
                       <Trophy size={48} className="text-amber-400 mb-6" />
                       <h2 className="text-3xl font-black mb-4">Anycast IP 深度探测</h2>
@@ -273,7 +287,7 @@ const App: React.FC = () => {
                           setIsOptimizing(false);
                         }} 
                         disabled={isOptimizing}
-                        className="px-10 py-5 bg-indigo-600 rounded-2xl font-black flex items-center gap-3 hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-900/40 mt-8"
+                        className="px-10 py-5 bg-indigo-600 rounded-2xl font-black flex items-center gap-3 hover:bg-indigo-700 transition-all mt-8"
                       >
                         {isOptimizing ? <RefreshCw className="animate-spin" /> : <Zap size={20} />}
                         {isOptimizing ? `探测中 ${probeProgress.percent}%` : '启动智能优选'}
@@ -285,8 +299,8 @@ const App: React.FC = () => {
                    <h3 className="text-xl font-bold mb-6 flex items-center gap-2">本地网络状态</h3>
                    <div className="space-y-4">
                       <div className="p-6 bg-slate-50 rounded-2xl border border-slate-100">
-                        <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest mb-2">出口 IPv4</p>
-                        <p className="text-2xl font-mono font-black text-slate-800">{userInfo?.ip || '正在获取...'}</p>
+                        <p className="text-[10px] text-slate-400 font-black uppercase mb-2">出口 IP</p>
+                        <p className="text-2xl font-mono font-black text-slate-800">{userInfo?.ip || '获取中...'}</p>
                       </div>
                       <div className="grid grid-cols-2 gap-4">
                         <div className="p-4 border border-slate-100 rounded-2xl">
@@ -294,7 +308,7 @@ const App: React.FC = () => {
                           <p className="text-xs font-black text-slate-700 truncate">{userInfo?.org}</p>
                         </div>
                         <div className="p-4 border border-slate-100 rounded-2xl">
-                          <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">网络位置</p>
+                          <p className="text-[10px] text-slate-400 font-bold uppercase mb-1">地理位置</p>
                           <p className="text-xs font-black text-indigo-600 truncate">{userInfo?.city}, {userInfo?.country}</p>
                         </div>
                       </div>
@@ -308,29 +322,29 @@ const App: React.FC = () => {
           <div className="animate-in fade-in slide-in-from-right-4 duration-500 max-w-4xl space-y-8">
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
               <div className="bg-white rounded-[2.5rem] p-10 border border-slate-200 shadow-sm">
-                <h2 className="text-2xl font-black text-slate-800 mb-6">Cloudflare API 凭据</h2>
+                <h2 className="text-2xl font-black text-slate-800 mb-6">Cloudflare API</h2>
                 <div className="space-y-6">
                   <div>
                     <label className="text-xs font-black text-slate-400 uppercase block mb-2">API Token</label>
-                    <input type="password" value={cfConfig.apiToken} onChange={e => setCfConfig({...cfConfig, apiToken: e.target.value})} className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm font-mono outline-none focus:ring-2 focus:ring-indigo-500" placeholder="在 CF 面板生成令牌" />
+                    <input type="password" value={cfConfig.apiToken} onChange={e => setCfConfig({...cfConfig, apiToken: e.target.value})} className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm font-mono outline-none focus:ring-2 focus:ring-indigo-500" placeholder="API 令牌" />
                   </div>
                   <div>
                     <label className="text-xs font-black text-slate-400 uppercase block mb-2">Zone ID</label>
-                    <input type="text" value={cfConfig.zoneId} onChange={e => setCfConfig({...cfConfig, zoneId: e.target.value})} className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm font-mono outline-none focus:ring-2 focus:ring-indigo-500" placeholder="域名的区域 ID" />
+                    <input type="text" value={cfConfig.zoneId} onChange={e => setCfConfig({...cfConfig, zoneId: e.target.value})} className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm font-mono outline-none focus:ring-2 focus:ring-indigo-500" placeholder="区域 ID" />
                   </div>
                   <div>
                     <label className="text-xs font-black text-slate-400 uppercase block mb-2">解析主域名</label>
-                    <input type="text" value={cfConfig.domain} onChange={e => setCfConfig({...cfConfig, domain: e.target.value})} className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm font-mono outline-none focus:ring-2 focus:ring-indigo-500" placeholder="例如: shiye.ggff.net" />
+                    <input type="text" value={cfConfig.domain} onChange={e => setCfConfig({...cfConfig, domain: e.target.value})} className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm font-mono outline-none focus:ring-2 focus:ring-indigo-500" placeholder="如: shiye.ggff.net" />
                   </div>
-                  <button onClick={() => { localStorage.setItem('cv_config', JSON.stringify(cfConfig)); alert('配置已手动保存'); }} className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black flex items-center justify-center gap-2 shadow-lg shadow-indigo-100">
+                  <button onClick={() => { localStorage.setItem('cv_config', JSON.stringify(cfConfig)); alert('已保存'); }} className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black flex items-center justify-center gap-2">
                     <Save size={18} /> 保存配置
                   </button>
                 </div>
               </div>
 
-              <div className="bg-slate-900 rounded-[2.5rem] p-10 text-white shadow-xl">
+              <div className="bg-slate-900 rounded-[2.5rem] p-10 text-white">
                 <div className="flex justify-between items-center mb-6">
-                   <h2 className="text-2xl font-black">CORS 中转后端</h2>
+                   <h2 className="text-2xl font-black">CORS 代理 (后端)</h2>
                    <button onClick={() => setCfConfig({...cfConfig, useProxy: !cfConfig.useProxy})}>
                       {cfConfig.useProxy ? <ToggleRight size={36} className="text-indigo-400" /> : <ToggleLeft size={36} className="text-slate-600" />}
                    </button>
@@ -339,16 +353,19 @@ const App: React.FC = () => {
                    <div className="flex justify-between items-center mb-2">
                      <label className="text-[10px] font-black text-slate-500 uppercase block">私有代理 URL</label>
                      <div className="flex items-center gap-2">
-                        {proxyStatus === 'online' && <span className="text-[9px] font-bold text-emerald-400 flex items-center gap-1"><Wifi size={10} /> 正常</span>}
-                        {proxyStatus === 'offline' && <span className="text-[9px] font-bold text-rose-400 flex items-center gap-1"><WifiOff size={10} /> 失败</span>}
-                        <button onClick={checkProxyStatus} className="text-[9px] font-bold text-indigo-300 hover:text-white underline">测试</button>
+                        {proxyStatus === 'online' && <span className="text-[9px] font-bold text-emerald-400">在线</span>}
+                        {proxyStatus === 'offline' && <span className="text-[9px] font-bold text-rose-400">离线</span>}
+                        <button onClick={checkProxyStatus} className="text-[9px] font-bold text-indigo-300 underline">测试</button>
                      </div>
                    </div>
                    <input type="text" value={cfConfig.proxyUrl} onChange={e => { setCfConfig({...cfConfig, proxyUrl: e.target.value}); setProxyStatus('idle'); }} className="w-full bg-slate-800 border border-slate-700 p-4 rounded-2xl text-sm font-mono outline-none text-indigo-400 focus:border-indigo-500 transition-all" placeholder="https://your-worker.workers.dev" />
                 </div>
                 <button onClick={copyWorkerCode} className="w-full py-4 bg-white/10 hover:bg-white/20 rounded-2xl font-bold flex items-center justify-center gap-2 border border-white/10 transition-all text-sm mb-4">
-                   <Code2 size={18} /> 复制终极源码 (解决 JSON 报错)
+                   <Code2 size={18} /> 复制稳定版源码 (解决 405)
                 </button>
+                <div className="text-[10px] text-slate-500 text-center flex items-center justify-center gap-2">
+                   <Info size={12} /> 提示：URL 变化后必须点击“保存配置”
+                </div>
               </div>
             </div>
           </div>
@@ -358,10 +375,10 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="flex h-screen bg-slate-50 overflow-hidden font-sans">
+    <div className="flex h-screen bg-slate-50 overflow-hidden">
       <aside className={`${sidebarOpen ? 'w-72' : 'w-24'} bg-white border-r border-slate-100 transition-all duration-300 flex flex-col z-50`}>
         <div className="p-8 flex items-center gap-3">
-          <div className="w-10 h-10 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-indigo-100 shrink-0">
+          <div className="w-10 h-10 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shrink-0">
             <Cloud size={24} />
           </div>
           {sidebarOpen && <h1 className="text-xl font-black text-slate-800">CloudVista</h1>}
@@ -378,17 +395,15 @@ const App: React.FC = () => {
 
       <main className="flex-1 flex flex-col overflow-hidden">
         <header className="h-20 bg-white/50 backdrop-blur-md border-b border-slate-100 flex items-center justify-between px-10 z-40">
-          <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 text-slate-400 hover:bg-slate-50 rounded-xl transition-colors">
+          <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 text-slate-400 hover:bg-slate-50 rounded-xl">
             <Menu size={20} />
           </button>
-          <div className="flex items-center gap-4">
-             <button 
-               onClick={() => setIsCreateModalOpen(true)}
-               className="px-8 py-3.5 bg-indigo-600 text-white rounded-2xl text-sm font-black hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100 flex items-center gap-2"
-             >
-               <Zap size={18} /> 同步解析节点
-             </button>
-          </div>
+          <button 
+            onClick={() => setIsCreateModalOpen(true)}
+            className="px-8 py-3.5 bg-indigo-600 text-white rounded-2xl text-sm font-black hover:bg-indigo-700 shadow-xl shadow-indigo-100 flex items-center gap-2"
+          >
+            <Zap size={18} /> 同步解析节点
+          </button>
         </header>
         <div className="flex-1 overflow-y-auto p-10 custom-scrollbar">
           {renderContentView()}
@@ -406,14 +421,12 @@ const App: React.FC = () => {
              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                 <div className="space-y-6">
                    <div>
-                     <label className="text-[10px] font-black text-slate-400 uppercase mb-2 block">子域名 (必须使用英文/数字)</label>
-                     <div className="flex items-center bg-slate-50 border border-slate-200 rounded-2xl overflow-hidden focus-within:ring-2 focus-within:ring-indigo-500 transition-all">
-                       <input className="flex-1 bg-transparent p-4 text-sm font-bold outline-none" value={newNodeData.id} onChange={e => setNewNodeData({...newNodeData, id: e.target.value.replace(/[^a-zA-Z0-9-]/g, '')})} placeholder="如: node-01" />
-                     </div>
+                     <label className="text-[10px] font-black text-slate-400 uppercase mb-2 block">子域名 (仅英文数字)</label>
+                     <input className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500" value={newNodeData.id} onChange={e => setNewNodeData({...newNodeData, id: e.target.value.replace(/[^a-zA-Z0-9-]/g, '')})} placeholder="如: node-01" />
                    </div>
                    <div>
-                     <label className="text-[10px] font-black text-slate-400 uppercase mb-2 block">节点友好名称</label>
-                     <input className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500 transition-all" value={newNodeData.name} onChange={e => setNewNodeData({...newNodeData, name: e.target.value})} placeholder="如: 我的加速节点" />
+                     <label className="text-[10px] font-black text-slate-400 uppercase mb-2 block">节点名称</label>
+                     <input className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500" value={newNodeData.name} onChange={e => setNewNodeData({...newNodeData, name: e.target.value})} placeholder="如: 美国高性能节点" />
                    </div>
                    <button 
                      onClick={handleConfirmDeploy} 
@@ -421,7 +434,7 @@ const App: React.FC = () => {
                      className="w-full py-5 bg-indigo-600 text-white rounded-2xl font-black hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 shadow-xl shadow-indigo-100"
                    >
                      {isDeploying ? <Loader2 className="animate-spin" /> : <ShieldCheck size={18} />}
-                     {isDeploying ? '正在部署...' : '立即提交'}
+                     {isDeploying ? '同步中...' : '提交部署'}
                    </button>
                 </div>
                 <div className="bg-slate-900 rounded-[2rem] p-6 flex flex-col">
@@ -446,10 +459,10 @@ const App: React.FC = () => {
               <button onClick={() => setSelectedNode(null)}><XCircle size={24} className="text-slate-200" /></button>
             </div>
             <div className="bg-slate-900 p-10 rounded-[3rem] flex flex-col items-center text-center text-white mb-8">
-               <div className="bg-white p-5 rounded-[2rem] mb-6 shadow-inner">
+               <div className="bg-white p-5 rounded-[2rem] mb-6">
                   <QRCodeSVG value={generateConfigLink(selectedNode)} size={180} />
                </div>
-               <button onClick={() => { navigator.clipboard.writeText(generateConfigLink(selectedNode)); alert('已复制！'); }} className="w-full py-4 bg-indigo-600 rounded-2xl text-xs font-black flex items-center justify-center gap-2">
+               <button onClick={() => { navigator.clipboard.writeText(generateConfigLink(selectedNode)); alert('已复制'); }} className="w-full py-4 bg-indigo-600 rounded-2xl text-xs font-black flex items-center justify-center gap-2">
                   <Copy size={16} /> 复制配置链接
                </button>
             </div>
