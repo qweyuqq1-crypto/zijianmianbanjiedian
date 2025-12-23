@@ -4,29 +4,21 @@ import { CFConfig, CFNode } from "../types";
 const BASE_URL = "https://api.cloudflare.com/client/v4";
 
 export const cloudflareApi = {
-  /**
-   * 清洗 ID，去除引号和空格
-   */
   sanitizeId(id: string): string {
     if (!id) return "";
     return id.trim().replace(/^["']|["']$/g, '');
   },
 
-  /**
-   * 通用请求封装，增加详细调试
-   */
   async request(config: CFConfig, method: string, path: string, body?: any) {
     const apiToken = this.sanitizeId(config.apiToken);
     const zoneId = this.sanitizeId(config.zoneId);
 
     if (!apiToken || !zoneId) {
-      throw new Error("配置缺失：请在设置中填写 API Token 和 Zone ID (确保没有多余的引号)");
+      throw new Error("配置缺失：请检查 Token 和 Zone ID 是否填写正确。");
     }
 
-    // 处理路径中的 Zone ID 替换，确保它是干净的
-    // 之前的 path 可能是从外部传入的包含 ${config.zoneId} 的字符串
-    // 我们在具体方法里调用时需要确保传入的也是清洗过的
-    const cleanPath = path.replace(config.zoneId, zoneId);
+    // 确保 path 开头有斜杠且没有双斜杠
+    const cleanPath = path.startsWith('/') ? path : `/${path}`;
     const targetUrl = `${BASE_URL}${cleanPath}`;
     
     const headers: Record<string, string> = {
@@ -35,13 +27,16 @@ export const cloudflareApi = {
       'Accept': 'application/json'
     };
 
-    let finalUrl = targetUrl;
+    let fetchUrl = targetUrl;
     if (config.useProxy && config.proxyUrl) {
-      finalUrl = config.proxyUrl.endsWith('/') ? config.proxyUrl.slice(0, -1) : config.proxyUrl;
+      // 确保代理 URL 格式正确
+      fetchUrl = config.proxyUrl.replace(/\/$/, ''); 
       headers['x-target-url'] = targetUrl;
     }
 
-    const response = await fetch(finalUrl, {
+    console.log(`[CloudVista] 发送请求: ${method} ${targetUrl}`, body);
+
+    const response = await fetch(fetchUrl, {
       method,
       headers,
       body: body ? JSON.stringify(body) : undefined
@@ -51,23 +46,13 @@ export const cloudflareApi = {
     
     if (!contentType.includes("application/json")) {
       const errorText = await response.text();
-      // 检查是否是由于路径错误导致的 404
-      if (response.status === 404 || response.status === 400) {
-         throw new Error(`Cloudflare 路由错误 (${response.status})：请检查 Zone ID 是否包含多余引号或空格。原始返回：${errorText.slice(0, 50)}`);
-      }
-      throw new Error(`服务器返回了非 JSON 内容 (${response.status}): ${errorText.slice(0, 100)}...`);
+      throw new Error(`请求失败 (${response.status}): ${errorText.slice(0, 100)}`);
     }
 
-    let data;
-    try {
-      const text = await response.text();
-      data = JSON.parse(text);
-    } catch (e) {
-      throw new Error(`JSON 解析失败，服务器可能返回了损坏的数据`);
-    }
+    const data = await response.json();
 
     if (!response.ok || !data.success) {
-      const errorMsg = data.errors?.[0]?.message || `API 错误 (${response.status})`;
+      const errorMsg = data.errors?.[0]?.message || `API 报错 (${response.status})`;
       throw new Error(`Cloudflare: ${errorMsg}`);
     }
 
@@ -75,8 +60,8 @@ export const cloudflareApi = {
   },
 
   async listDnsRecords(config: CFConfig): Promise<CFNode[]> {
-    const cleanZoneId = this.sanitizeId(config.zoneId);
-    const data = await this.request(config, 'GET', `/zones/${cleanZoneId}/dns_records?type=A,AAAA,CNAME&per_page=100`);
+    const zoneId = this.sanitizeId(config.zoneId);
+    const data = await this.request(config, 'GET', `/zones/${zoneId}/dns_records?type=A,AAAA,CNAME&per_page=100`);
     return data.result.map((rec: any) => ({
       id: rec.name.split('.')[0],
       name: rec.name,
@@ -94,10 +79,16 @@ export const cloudflareApi = {
   },
 
   async createDnsRecord(config: CFConfig, node: Partial<CFNode>): Promise<any> {
-    const cleanZoneId = this.sanitizeId(config.zoneId);
-    return this.request(config, 'POST', `/zones/${cleanZoneId}/dns_records`, {
+    const zoneId = this.sanitizeId(config.zoneId);
+    const domain = config.domain.trim().toLowerCase();
+    
+    // 关键修复：Cloudflare API 的 name 必须是完整域名或者能被识别的子域名
+    // 如果用户只输入了 'gj'，我们帮他拼接成 'gj.shiye.ggff.net'
+    const fullName = node.id?.includes('.') ? node.id : `${node.id}.${domain}`;
+
+    return this.request(config, 'POST', `/zones/${zoneId}/dns_records`, {
       type: node.type || 'A',
-      name: node.id,
+      name: fullName,
       content: node.location,
       ttl: 1, 
       proxied: node.proxied ?? true
