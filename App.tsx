@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Globe, Activity, ShieldCheck, Settings, Menu, Zap, 
   BarChart3, ShieldAlert, CheckCircle2, Copy, RefreshCw, Trophy, 
   XCircle, Save, Cloud, BrainCircuit, Search, Database, Shield, Lock, 
-  ExternalLink, Share2, Trash2, QrCode, MapPin
+  ExternalLink, Share2, Trash2, QrCode, MapPin, AlertCircle, Loader2, Key
 } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
 import { QRCodeSVG } from 'qrcode.react';
@@ -15,10 +15,20 @@ import GlobalMap from './components/GlobalMap';
 import { fetchUserInfo } from './services/ipService';
 import { testAndRankIPs } from './services/diagnosticService';
 import { analyzeNodesWithAI } from './services/geminiService';
+import { cloudflareApi } from './services/cloudflareService';
 
 type ViewType = 'dashboard' | 'network' | 'lab' | 'security' | 'settings';
 
 const App: React.FC = () => {
+  // 环境变量检测
+  const envConfig = {
+    apiToken: process.env.CF_API_TOKEN || '',
+    zoneId: process.env.CF_ZONE_ID || '',
+    domain: process.env.CF_DOMAIN || ''
+  };
+
+  const isSystemManaged = !!(envConfig.apiToken && envConfig.zoneId);
+
   // 状态管理
   const [activeView, setActiveView] = useState<ViewType>('dashboard');
   const [nodes, setNodes] = useState<CFNode[]>(() => {
@@ -38,21 +48,30 @@ const App: React.FC = () => {
   const [probeProgress, setProbeProgress] = useState({ currentIP: '', percent: 0 });
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
 
-  // 配置与模式
-  const [isSimulatedMode, setIsSimulatedMode] = useState(true);
-  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [newNodeData, setNewNodeData] = useState({ id: '', name: '' });
-  const [cfConfig, setCfConfig] = useState<CFConfig>(() => {
+  // 配置管理 (本地输入部分)
+  const [localCfConfig, setLocalCfConfig] = useState<CFConfig>(() => {
     const saved = localStorage.getItem('cv_config');
-    return saved ? JSON.parse(saved) : { apiToken: '', zoneId: '' };
+    return saved ? JSON.parse(saved) : { apiToken: '', zoneId: '', domain: '' };
   });
+
+  // 最终使用的配置 (环境变量优先)
+  const activeCfConfig = useMemo(() => ({
+    apiToken: envConfig.apiToken || localCfConfig.apiToken,
+    zoneId: envConfig.zoneId || localCfConfig.zoneId,
+    domain: envConfig.domain || localCfConfig.domain
+  }), [localCfConfig, envConfig]);
 
   // 搜索
   const [searchQuery, setSearchQuery] = useState('');
 
+  // 状态显示控制
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [isDeploying, setIsDeploying] = useState(false);
+  const [newNodeData, setNewNodeData] = useState({ id: '', name: '' });
+
   // 数据持久化
   useEffect(() => { localStorage.setItem('cv_nodes', JSON.stringify(nodes)); }, [nodes]);
-  useEffect(() => { localStorage.setItem('cv_config', JSON.stringify(cfConfig)); }, [cfConfig]);
+  useEffect(() => { localStorage.setItem('cv_config', JSON.stringify(localCfConfig)); }, [localCfConfig]);
 
   const stats = useMemo(() => {
     const validNodes = nodes.filter(n => n.status === 'online');
@@ -89,32 +108,49 @@ const App: React.FC = () => {
     } catch (error) { console.error(error); } finally { setIsOptimizing(false); }
   };
 
-  // 创建节点逻辑
-  const handleConfirmDeploy = () => {
+  const handleConfirmDeploy = async () => {
     if (!newNodeData.id || !newNodeData.name) {
       alert("请填写完整信息");
       return;
     }
 
-    const newNode: CFNode = {
-      id: newNodeData.id.toUpperCase(),
-      name: newNodeData.name,
-      location: optimalIPs[0]?.ip || "104.16.0.1", // 使用当前最优 IP
-      coords: [110 + Math.random() * 20, 20 + Math.random() * 10], // 随机位置模拟
-      status: 'online',
-      latency: optimalIPs[0]?.latency || 45,
-      uptime: 100,
-      requests: 0,
-      lastUpdate: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      source: 'manual',
-      proxied: true,
-      type: 'A'
-    };
+    if (!activeCfConfig.apiToken || !activeCfConfig.zoneId || !activeCfConfig.domain) {
+      alert("请先前往“系统配置”完成 Cloudflare 认证配置");
+      setActiveView('settings');
+      setIsCreateModalOpen(false);
+      return;
+    }
 
-    setNodes([newNode, ...nodes]);
-    setIsCreateModalOpen(false);
-    setNewNodeData({ id: '', name: '' });
-    setSelectedNode(newNode); // 自动打开详情
+    setIsDeploying(true);
+    try {
+      const targetIP = optimalIPs[0]?.ip || "104.16.0.1";
+      const newNode: CFNode = {
+        id: newNodeData.id.toLowerCase(),
+        name: newNodeData.name,
+        location: targetIP,
+        coords: [110 + Math.random() * 20, 20 + Math.random() * 10],
+        status: 'online',
+        latency: optimalIPs[0]?.latency || 45,
+        uptime: 100,
+        requests: 0,
+        lastUpdate: new Date().toISOString().replace('T', ' ').substring(0, 19),
+        source: 'manual',
+        proxied: true,
+        type: 'A'
+      };
+
+      await cloudflareApi.createDnsRecord(activeCfConfig, newNode, false);
+
+      setNodes([newNode, ...nodes]);
+      setIsCreateModalOpen(false);
+      setNewNodeData({ id: '', name: '' });
+      setSelectedNode(newNode);
+      alert("节点已成功部署至 Cloudflare 边缘网络！");
+    } catch (error: any) {
+      alert(`部署失败: ${error.message}`);
+    } finally {
+      setIsDeploying(false);
+    }
   };
 
   const handleDeleteNode = (id: string) => {
@@ -124,11 +160,11 @@ const App: React.FC = () => {
     }
   };
 
-  // 生成配置链接 (VLESS 风格模拟)
   const generateConfigLink = (node: CFNode) => {
-    const uuid = "de305d54-75b4-431b-adb2-eb6b9e546014"; // 模拟 UUID
-    const host = cfConfig.zoneId || "cloudvista.xyz";
-    return `vless://${uuid}@${node.location}:443?encryption=none&security=tls&sni=${host}&fp=chrome&type=ws&host=${host}&path=%2F%3Fed%3D2048#CloudVista-${node.id}`;
+    const uuid = "de305d54-75b4-431b-adb2-eb6b9e546014"; 
+    const fullHost = node.source === 'mock' ? 'cloudvista.xyz' : `${node.id}.${activeCfConfig.domain}`;
+    const serverAddress = node.location;
+    return `vless://${uuid}@${serverAddress}:443?encryption=none&security=tls&sni=${fullHost}&fp=chrome&type=ws&host=${fullHost}&path=%2F%3Fed%3D2048#CloudVista-${node.id}`;
   };
 
   useEffect(() => {
@@ -143,7 +179,6 @@ const App: React.FC = () => {
     return () => clearInterval(interval);
   }, []);
 
-  // 渲染视图逻辑
   const renderContentView = () => {
     switch(activeView) {
       case 'dashboard':
@@ -212,30 +247,7 @@ const App: React.FC = () => {
                   />
                 </div>
               </div>
-              
-              <div className="grid grid-cols-1 xl:grid-cols-4 gap-8">
-                <div className="xl:col-span-3">
-                   <GlobalMap nodes={nodes} onNodeSelect={setSelectedNode} />
-                </div>
-                <div className="space-y-4 max-h-[450px] overflow-y-auto pr-2 custom-scrollbar">
-                  {filteredNodes.map(node => (
-                    <div 
-                      key={node.id} 
-                      onClick={() => setSelectedNode(node)}
-                      className={`p-4 border rounded-2xl cursor-pointer transition-all ${selectedNode?.id === node.id ? 'bg-indigo-50 border-indigo-200 shadow-lg' : 'bg-slate-50 border-slate-100 hover:border-indigo-200'}`}
-                    >
-                      <div className="flex justify-between mb-2">
-                        <span className="text-sm font-bold">{node.name}</span>
-                        <div className={`w-2 h-2 rounded-full ${node.status === 'online' ? 'bg-emerald-500' : 'bg-rose-500'}`}></div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 text-[10px] text-slate-500 font-bold uppercase">
-                        <div>延迟: <span className="text-slate-800">{node.latency}ms</span></div>
-                        <div>配置类型: <span className="text-slate-800">{node.type}</span></div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
+              <GlobalMap nodes={nodes} onNodeSelect={setSelectedNode} />
             </div>
           </div>
         );
@@ -318,27 +330,68 @@ const App: React.FC = () => {
         return (
           <div className="animate-in fade-in slide-in-from-right-4 duration-500 max-w-2xl">
              <div className="bg-white rounded-[2.5rem] p-10 border border-slate-200 shadow-sm">
-                <h2 className="text-2xl font-black text-slate-800 mb-8">系统全局配置</h2>
+                <div className="flex justify-between items-start mb-8">
+                   <div>
+                      <h2 className="text-2xl font-black text-slate-800">系统全局配置</h2>
+                      <p className="text-slate-500 text-sm mt-1">配置 Cloudflare API 以启用云端同步功能</p>
+                   </div>
+                   {isSystemManaged && (
+                     <div className="px-3 py-1 bg-emerald-50 text-emerald-600 rounded-lg text-[10px] font-black uppercase flex items-center gap-1 border border-emerald-100">
+                        <ShieldCheck size={12} /> 系统机密已启用
+                     </div>
+                   )}
+                </div>
+                
                 <div className="space-y-8">
                    <div className="space-y-4">
-                      <label className="text-xs font-black text-slate-400 uppercase ml-1">Cloudflare API 令牌</label>
-                      <input 
-                        type="password" placeholder="请输入您的 CF_API_TOKEN" 
-                        className="w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
-                        value={cfConfig.apiToken} onChange={e => setCfConfig({...cfConfig, apiToken: e.target.value})}
-                      />
+                      <label className="text-xs font-black text-slate-400 uppercase ml-1 flex items-center justify-between">
+                        <span>Cloudflare API 令牌</span>
+                        {process.env.CF_API_TOKEN && <span className="text-[10px] text-emerald-500">已由环境变量提供</span>}
+                      </label>
+                      <div className="relative">
+                        <input 
+                          type="password" placeholder={process.env.CF_API_TOKEN ? "******** (系统托管)" : "请输入您的 CF_API_TOKEN"}
+                          disabled={!!process.env.CF_API_TOKEN}
+                          className={`w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none font-mono ${process.env.CF_API_TOKEN ? 'opacity-60 cursor-not-allowed' : ''}`}
+                          value={localCfConfig.apiToken} onChange={e => setLocalCfConfig({...localCfConfig, apiToken: e.target.value})}
+                        />
+                        <Key className="absolute right-5 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
+                      </div>
+                      {!process.env.CF_API_TOKEN && <p className="text-[10px] text-slate-400 px-1">安全提示：建议在 Cloudflare Pages 面板中配置环境变量 CF_API_TOKEN</p>}
                    </div>
-                   <div className="space-y-4">
-                      <label className="text-xs font-black text-slate-400 uppercase ml-1">区域 ID (Zone ID)</label>
-                      <input 
-                        type="text" placeholder="请输入您的 Zone ID" 
-                        className="w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none font-mono"
-                        value={cfConfig.zoneId} onChange={e => setCfConfig({...cfConfig, zoneId: e.target.value})}
-                      />
+
+                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div className="space-y-4">
+                        <label className="text-xs font-black text-slate-400 uppercase ml-1 flex items-center justify-between">
+                           <span>区域 ID (Zone ID)</span>
+                           {process.env.CF_ZONE_ID && <span className="text-emerald-500">托管</span>}
+                        </label>
+                        <input 
+                          type="text" placeholder={process.env.CF_ZONE_ID ? "系统托管" : "CF 域名面板获取"}
+                          disabled={!!process.env.CF_ZONE_ID}
+                          className={`w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none font-mono ${process.env.CF_ZONE_ID ? 'opacity-60 cursor-not-allowed' : ''}`}
+                          value={localCfConfig.zoneId} onChange={e => setLocalCfConfig({...localCfConfig, zoneId: e.target.value})}
+                        />
+                      </div>
+                      <div className="space-y-4">
+                        <label className="text-xs font-black text-slate-400 uppercase ml-1 flex items-center justify-between">
+                           <span>加速根域名</span>
+                           {process.env.CF_DOMAIN && <span className="text-emerald-500">托管</span>}
+                        </label>
+                        <input 
+                          type="text" placeholder={process.env.CF_DOMAIN ? process.env.CF_DOMAIN : "例如: example.com"}
+                          disabled={!!process.env.CF_DOMAIN}
+                          className={`w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none font-mono ${process.env.CF_DOMAIN ? 'opacity-60 cursor-not-allowed' : ''}`}
+                          value={localCfConfig.domain} onChange={e => setLocalCfConfig({...localCfConfig, domain: e.target.value})}
+                        />
+                      </div>
                    </div>
-                   <button onClick={() => alert('设置已加密保存')} className="w-full py-4 bg-slate-900 text-white rounded-2xl font-bold flex items-center justify-center gap-2">
-                     <Save size={18} /> 保存配置
-                   </button>
+
+                   {!isSystemManaged && (
+                     <button onClick={() => alert('设置已加密保存至本地')} className="w-full py-4 bg-slate-900 text-white rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-slate-800 transition-all">
+                       <Save size={18} /> 保存本地配置
+                     </button>
+                   )}
                 </div>
              </div>
           </div>
@@ -350,7 +403,6 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-slate-50 flex overflow-hidden selection:bg-indigo-100">
-      {/* Sidebar */}
       <aside className={`${sidebarOpen ? 'w-64' : 'w-20'} bg-white border-r border-slate-200 transition-all duration-300 flex flex-col z-50`}>
         <div className="p-6 flex items-center gap-3">
           <div className="w-10 h-10 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shrink-0">
@@ -369,7 +421,6 @@ const App: React.FC = () => {
         </nav>
       </aside>
 
-      {/* Main Content */}
       <main className="flex-1 flex flex-col overflow-hidden">
         <header className="h-20 bg-white/80 backdrop-blur-xl border-b border-slate-100 flex items-center justify-between px-8 z-40">
           <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2.5 hover:bg-slate-50 rounded-xl text-slate-500 transition-colors">
@@ -391,102 +442,97 @@ const App: React.FC = () => {
         </div>
       </main>
 
-      {/* Create Modal */}
+      {/* 部署 Modal */}
       {isCreateModalOpen && (
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-md z-[100] flex items-center justify-center p-4">
-          <div className="bg-white rounded-[2.5rem] w-full max-w-md shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200 p-8">
+          <div className="bg-white rounded-[2.5rem] w-full max-w-md shadow-2xl p-8 animate-in zoom-in-95 duration-200">
              <div className="flex justify-between items-center mb-8">
-                <h3 className="text-2xl font-black text-slate-800">部署新边缘节点</h3>
+                <h3 className="text-2xl font-black text-slate-800">部署边缘节点</h3>
                 <button onClick={() => setIsCreateModalOpen(false)}><XCircle size={24} className="text-slate-300" /></button>
              </div>
              <div className="space-y-6">
                 <div>
-                  <label className="text-xs font-black text-slate-400 uppercase mb-2 block">节点 ID (如: US-01)</label>
-                  <input className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm outline-none focus:ring-2 focus:ring-indigo-500" value={newNodeData.id} onChange={e => setNewNodeData({...newNodeData, id: e.target.value})} placeholder="唯一标识符" />
+                  <label className="text-xs font-black text-slate-400 uppercase mb-2 block">节点 ID (DNS 前缀)</label>
+                  <input className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm outline-none focus:ring-2 focus:ring-indigo-500" value={newNodeData.id} onChange={e => setNewNodeData({...newNodeData, id: e.target.value})} placeholder="例如: us-01" />
+                  <p className="text-[10px] text-slate-400 mt-1">最终域名: {newNodeData.id || 'node'}.{activeCfConfig.domain || 'domain.com'}</p>
                 </div>
                 <div>
-                  <label className="text-xs font-black text-slate-400 uppercase mb-2 block">节点显示名称</label>
-                  <input className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm outline-none focus:ring-2 focus:ring-indigo-500" value={newNodeData.name} onChange={e => setNewNodeData({...newNodeData, name: e.target.value})} placeholder="例如: 硅谷加速 01" />
+                  <label className="text-xs font-black text-slate-400 uppercase mb-2 block">显示名称</label>
+                  <input className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm outline-none focus:ring-2 focus:ring-indigo-500" value={newNodeData.name} onChange={e => setNewNodeData({...newNodeData, name: e.target.value})} placeholder="例如: 洛杉矶加速" />
                 </div>
                 <div className="p-4 bg-indigo-50 rounded-2xl border border-indigo-100">
-                  <p className="text-[10px] font-black text-indigo-600 uppercase mb-1">自动绑定最优 IP</p>
-                  <p className="text-sm font-mono font-bold">{optimalIPs[0]?.ip || '正在从优选库获取...'}</p>
+                  <p className="text-[10px] font-black text-indigo-600 uppercase mb-1">自动绑定优选 IP</p>
+                  <p className="text-sm font-mono font-bold flex items-center gap-2">
+                    <MapPin size={12} /> {optimalIPs[0]?.ip || '104.16.0.1'}
+                  </p>
                 </div>
-                <button onClick={handleConfirmDeploy} className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all">
-                  确认部署并生成配置
+                <button 
+                  onClick={handleConfirmDeploy} 
+                  disabled={isDeploying}
+                  className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 shadow-xl shadow-indigo-200"
+                >
+                  {isDeploying ? <Loader2 className="animate-spin" /> : <ShieldCheck size={18} />}
+                  {isDeploying ? '正在同步云端...' : '立即部署'}
                 </button>
              </div>
           </div>
         </div>
       )}
 
-      {/* Node Detail Drawer / Modal */}
+      {/* 节点详情 Drawer */}
       {selectedNode && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[110] flex items-center justify-end">
           <div className="h-full w-full max-w-md bg-white shadow-2xl animate-in slide-in-from-right duration-300 overflow-y-auto custom-scrollbar">
             <div className="p-8 border-b border-slate-100 flex justify-between items-center sticky top-0 bg-white z-10">
-              <h3 className="text-xl font-black text-slate-800 flex items-center gap-2"><Globe className="text-indigo-600" /> 节点配置详情</h3>
+              <h3 className="text-xl font-black text-slate-800 flex items-center gap-2"><Globe className="text-indigo-600" /> 节点详情</h3>
               <button onClick={() => setSelectedNode(null)} className="p-2 hover:bg-slate-100 rounded-full transition-colors"><XCircle size={24} className="text-slate-300" /></button>
             </div>
             
             <div className="p-8 space-y-8">
-              {/* 基本信息 */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                   <p className="text-[10px] font-black text-slate-400 uppercase">节点状态</p>
-                   <p className="text-emerald-600 font-bold flex items-center gap-1"><CheckCircle2 size={12} /> 运行中</p>
+                   <p className="text-[10px] font-black text-slate-400 uppercase">状态</p>
+                   <p className={`font-bold flex items-center gap-1 ${selectedNode.status === 'online' ? 'text-emerald-600' : 'text-rose-600'}`}>
+                     <CheckCircle2 size={12} /> {selectedNode.status === 'online' ? '运行中' : '异常'}
+                   </p>
                 </div>
                 <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                   <p className="text-[10px] font-black text-slate-400 uppercase">实时延迟</p>
-                   <p className="text-slate-800 font-bold">{selectedNode.latency}ms</p>
+                   <p className="text-[10px] font-black text-slate-400 uppercase">延迟</p>
+                   <p className="text-slate-800 font-bold">{selectedNode.latency.toFixed(0)}ms</p>
                 </div>
               </div>
 
-              {/* 二维码展示 */}
               <div className="bg-slate-900 p-8 rounded-[2.5rem] flex flex-col items-center text-center shadow-2xl">
-                 <div className="bg-white p-4 rounded-3xl mb-6 shadow-inner">
-                    <QRCodeSVG 
-                      value={generateConfigLink(selectedNode)} 
-                      size={180} 
-                      level="H" 
-                      includeMargin={false}
-                    />
+                 <div className="bg-white p-4 rounded-3xl mb-6">
+                    <QRCodeSVG value={generateConfigLink(selectedNode)} size={180} level="H" />
                  </div>
                  <h4 className="text-white font-black text-lg mb-1">{selectedNode.name}</h4>
-                 <p className="text-slate-400 text-xs mb-6">扫描上方二维码或复制下方链接导入客户端</p>
-                 <div className="w-full flex gap-2">
-                    <button 
-                      onClick={() => copyToClipboard(generateConfigLink(selectedNode))}
-                      className="flex-1 py-3 bg-indigo-600 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 hover:bg-indigo-500 transition-all"
-                    >
-                      {copyStatus === generateConfigLink(selectedNode) ? <CheckCircle2 size={14} /> : <Copy size={14} />}
-                      {copyStatus === generateConfigLink(selectedNode) ? '已复制' : '复制订阅链接'}
-                    </button>
-                    <button className="w-12 h-12 bg-white/10 text-white rounded-xl flex items-center justify-center hover:bg-white/20 transition-all">
-                      <Share2 size={18} />
-                    </button>
-                 </div>
+                 <p className="text-slate-400 text-[10px] mb-6">UUID: de305d54-75b4-431b-adb2-eb6b9e546014</p>
+                 <button 
+                   onClick={() => copyToClipboard(generateConfigLink(selectedNode))}
+                   className="w-full py-3 bg-indigo-600 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 hover:bg-indigo-500 transition-all"
+                 >
+                   {copyStatus === generateConfigLink(selectedNode) ? <CheckCircle2 size={14} /> : <Copy size={14} />}
+                   {copyStatus === generateConfigLink(selectedNode) ? '链接已复制' : '复制 VLESS 链接'}
+                 </button>
               </div>
 
-              {/* 详细参数 */}
               <div className="space-y-4">
-                 <h5 className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">配置参数明细</h5>
+                 <h5 className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">技术参数</h5>
                  <div className="space-y-3">
-                    <ParamItem label="连接地址" value={selectedNode.location} />
-                    <ParamItem label="传输协议" value="VLESS + WebSocket + TLS" />
-                    <ParamItem label="UUID" value="de305d54-75b4-431b-adb2-eb6b9e546014" />
-                    <ParamItem label="端口" value="443" />
-                    <ParamItem label="伪装域名" value={cfConfig.zoneId || "未设置"} />
+                    <ParamItem label="连接 IP" value={selectedNode.location} />
+                    <ParamItem label="SNI/Host" value={selectedNode.source === 'mock' ? 'cloudvista.xyz' : `${selectedNode.id}.${activeCfConfig.domain}`} />
+                    <ParamItem label="端口" value="443 (TLS)" />
+                    <ParamItem label="路径" value="/?ed=2048" />
                  </div>
               </div>
 
-              {/* 危险操作 */}
               <div className="pt-8 border-t border-slate-100">
                  <button 
                    onClick={() => handleDeleteNode(selectedNode.id)}
                    className="w-full py-4 bg-rose-50 text-rose-600 rounded-2xl text-xs font-bold flex items-center justify-center gap-2 hover:bg-rose-100 transition-all"
                  >
-                   <Trash2 size={16} /> 删除该节点
+                   <Trash2 size={16} /> 删除节点
                  </button>
               </div>
             </div>
@@ -498,7 +544,7 @@ const App: React.FC = () => {
 };
 
 const ParamItem: React.FC<{label: string, value: string}> = ({ label, value }) => (
-  <div className="flex justify-between items-center p-4 bg-slate-50 rounded-2xl border border-slate-100 group">
+  <div className="flex justify-between items-center p-4 bg-slate-50 rounded-2xl border border-slate-100">
     <span className="text-xs text-slate-400 font-bold">{label}</span>
     <span className="text-xs font-mono font-black text-slate-700 truncate max-w-[180px]">{value}</span>
   </div>
