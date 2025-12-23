@@ -16,33 +16,24 @@ import { fetchUserInfo } from './services/ipService';
 import { testAndRankIPs } from './services/diagnosticService';
 import { cloudflareApi } from './services/cloudflareService';
 
-// Added missing ViewType definition to fix 'Cannot find name ViewType' error
 type ViewType = 'dashboard' | 'network' | 'lab' | 'settings';
 
-// Cloudflare Worker 后端代理模板代码
 const WORKER_PROXY_CODE = `
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    // 目标 CF API 地址由前端传入，通过查询参数 ? 后的部分获取
     const targetUrl = url.search.slice(1); 
-    
     if (!targetUrl) return new Response("Missing Target URL", { status: 400 });
-
     const newRequest = new Request(targetUrl, {
       method: request.method,
       headers: request.headers,
       body: request.body
     });
-
     const response = await fetch(newRequest);
     const newResponse = new Response(response.body, response);
-    
-    // 设置 CORS 允许前端访问
     newResponse.headers.set("Access-Control-Allow-Origin", "*");
     newResponse.headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     newResponse.headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    
     return newResponse;
   }
 };`;
@@ -57,34 +48,44 @@ const App: React.FC = () => {
   const [selectedNode, setSelectedNode] = useState<CFNode | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
-  // 配置状态
+  // 强化后的配置初始化逻辑
   const [cfConfig, setCfConfig] = useState<CFConfig>(() => {
     const saved = localStorage.getItem('cv_config');
-    return saved ? JSON.parse(saved) : { 
-      apiToken: '', 
-      zoneId: '', 
-      domain: '',
-      useProxy: true, // 默认推荐开启代理
-      proxyUrl: '' 
+    // 获取环境变量作为回退默认值 (Vite 会在构建时注入这些)
+    const envDefaults = {
+      apiToken: process.env.CF_API_TOKEN || '',
+      zoneId: process.env.CF_ZONE_ID || '',
+      domain: process.env.CF_DOMAIN || '',
+      useProxy: true,
+      proxyUrl: ''
     };
+
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      // 如果本地存储里的值为空，但环境变量里有值，则使用环境变量的值
+      return {
+        ...envDefaults,
+        ...parsed,
+        apiToken: parsed.apiToken || envDefaults.apiToken,
+        zoneId: parsed.zoneId || envDefaults.zoneId,
+        domain: parsed.domain || envDefaults.domain,
+      };
+    }
+    return envDefaults;
   });
 
-  // Added missing generateConfigLink function to fix 'Cannot find name generateConfigLink' errors
   const generateConfigLink = (node: CFNode) => {
     const domain = cfConfig.domain || 'example.com';
-    // Using a placeholder UUID for the VLESS-style config link
     const uuid = "00000000-0000-0000-0000-000000000000";
     return `vless://${uuid}@${node.location}:443?encryption=none&security=tls&sni=${node.id}.${domain}&fp=safari&type=ws&host=${node.id}.${domain}&path=%2F#${encodeURIComponent(node.name)}`;
   };
 
-  // UI 交互状态
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
-  const [useSimulation, setUseSimulation] = useState(false); // 既然要“真正使用”，默认关掉模拟
+  const [useSimulation, setUseSimulation] = useState(false);
   const [newNodeData, setNewNodeData] = useState({ id: '', name: '' });
   const [deployLogs, setDeployLogs] = useState<string[]>([]);
 
-  // 优选状态
   const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
   const [optimalIPs, setOptimalIPs] = useState<OptimalIP[]>([]);
   const [isOptimizing, setIsOptimizing] = useState(false);
@@ -269,18 +270,27 @@ const App: React.FC = () => {
                 <h2 className="text-2xl font-black text-slate-800 mb-6">Cloudflare API 凭据</h2>
                 <div className="space-y-6">
                   <div>
-                    <label className="text-xs font-black text-slate-400 uppercase mb-2 block">API Token</label>
+                    <div className="flex justify-between items-center mb-2">
+                       <label className="text-xs font-black text-slate-400 uppercase block">API Token</label>
+                       {process.env.CF_API_TOKEN && <span className="text-[9px] font-bold bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full flex items-center gap-1"><ShieldCheck size={10} /> 已从环境加载</span>}
+                    </div>
                     <input type="password" value={cfConfig.apiToken} onChange={e => setCfConfig({...cfConfig, apiToken: e.target.value})} className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm font-mono outline-none focus:ring-2 focus:ring-indigo-500" placeholder="在 CF 面板生成令牌" />
                   </div>
                   <div>
-                    <label className="text-xs font-black text-slate-400 uppercase mb-2 block">Zone ID</label>
+                    <div className="flex justify-between items-center mb-2">
+                       <label className="text-xs font-black text-slate-400 uppercase block">Zone ID</label>
+                       {process.env.CF_ZONE_ID && <span className="text-[9px] font-bold bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full flex items-center gap-1"><ShieldCheck size={10} /> 已从环境加载</span>}
+                    </div>
                     <input type="text" value={cfConfig.zoneId} onChange={e => setCfConfig({...cfConfig, zoneId: e.target.value})} className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm font-mono outline-none focus:ring-2 focus:ring-indigo-500" placeholder="域名的区域 ID" />
                   </div>
                   <div>
-                    <label className="text-xs font-black text-slate-400 uppercase mb-2 block">解析主域名</label>
+                    <div className="flex justify-between items-center mb-2">
+                       <label className="text-xs font-black text-slate-400 uppercase block">解析主域名</label>
+                       {process.env.CF_DOMAIN && <span className="text-[9px] font-bold bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-full flex items-center gap-1"><ShieldCheck size={10} /> 已从环境加载</span>}
+                    </div>
                     <input type="text" value={cfConfig.domain} onChange={e => setCfConfig({...cfConfig, domain: e.target.value})} className="w-full bg-slate-50 border border-slate-200 p-4 rounded-2xl text-sm font-mono outline-none focus:ring-2 focus:ring-indigo-500" placeholder="例如: shiye.ggff.net" />
                   </div>
-                  <button onClick={() => alert('配置已保存')} className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black flex items-center justify-center gap-2 shadow-lg shadow-indigo-100">
+                  <button onClick={() => { localStorage.setItem('cv_config', JSON.stringify(cfConfig)); alert('配置已手动同步至本地存储'); }} className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black flex items-center justify-center gap-2 shadow-lg shadow-indigo-100">
                     <Save size={18} /> 保存配置
                   </button>
                 </div>
@@ -294,7 +304,7 @@ const App: React.FC = () => {
                    </button>
                 </div>
                 <p className="text-sm text-slate-400 leading-relaxed mb-6">
-                  由于浏览器安全限制，你无法直接连接 Cloudflare API。请将右侧代码部署为 Cloudflare Worker，并将生成的 URL 填入下方。
+                  环境变量设置的是 API 凭据，但 **浏览器 CORS 限制** 依然存在。你仍然需要部署并填写右侧的私有代理 URL 才能真正连接 API。
                 </p>
                 <div className="mb-6">
                    <label className="text-[10px] font-black text-slate-500 uppercase mb-2 block">私有代理 URL</label>
@@ -335,12 +345,18 @@ const App: React.FC = () => {
           <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 text-slate-400 hover:bg-slate-50 rounded-xl transition-colors">
             <Menu size={20} />
           </button>
-          <button 
-            onClick={() => setIsCreateModalOpen(true)}
-            className="px-8 py-3.5 bg-indigo-600 text-white rounded-2xl text-sm font-black hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100 flex items-center gap-2"
-          >
-            <Zap size={18} /> 同步解析节点
-          </button>
+          <div className="flex items-center gap-4">
+             <div className="hidden md:flex flex-col items-end mr-2">
+                <span className="text-[10px] font-black text-slate-400 uppercase">当前解析域</span>
+                <span className="text-xs font-bold text-indigo-600">{cfConfig.domain || '未配置'}</span>
+             </div>
+             <button 
+               onClick={() => setIsCreateModalOpen(true)}
+               className="px-8 py-3.5 bg-indigo-600 text-white rounded-2xl text-sm font-black hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100 flex items-center gap-2"
+             >
+               <Zap size={18} /> 同步解析节点
+             </button>
+          </div>
         </header>
         <div className="flex-1 overflow-y-auto p-10 custom-scrollbar">
           {renderContentView()}
