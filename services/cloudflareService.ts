@@ -6,9 +6,6 @@ const BASE_URL = "https://api.cloudflare.com/client/v4";
 export const cloudflareApi = {
   /**
    * 创建 DNS 记录
-   * @param config 用户配置
-   * @param node 节点信息
-   * @param isSimulated 是否模拟
    */
   async createDnsRecord(config: CFConfig, node: Partial<CFNode>, isSimulated: boolean = false): Promise<any> {
     if (isSimulated) {
@@ -21,12 +18,14 @@ export const cloudflareApi = {
     }
 
     // 默认请求地址
-    let targetUrl = `${BASE_URL}/zones/${config.zoneId}/dns_records`;
+    const targetUrl = `${BASE_URL}/zones/${config.zoneId}/dns_records`;
     
-    // 如果使用了代理
-    let finalUrl = config.useProxy && config.proxyUrl 
-      ? `${config.proxyUrl}${config.proxyUrl.includes('?') ? '' : '?'}${targetUrl}`
-      : targetUrl;
+    // 智能拼接 URL：去掉 proxyUrl 末尾的斜杠，并在拼接时使用 ? 分割
+    let finalUrl = targetUrl;
+    if (config.useProxy && config.proxyUrl) {
+      const cleanProxyUrl = config.proxyUrl.endsWith('/') ? config.proxyUrl.slice(0, -1) : config.proxyUrl;
+      finalUrl = `${cleanProxyUrl}?${targetUrl}`;
+    }
 
     try {
       const response = await fetch(finalUrl, {
@@ -39,7 +38,7 @@ export const cloudflareApi = {
           type: node.type || 'A',
           name: node.id,
           content: node.location,
-          ttl: 1, // 自动 TTL
+          ttl: 1, 
           proxied: node.proxied ?? true
         })
       });
@@ -53,8 +52,9 @@ export const cloudflareApi = {
 
       return data;
     } catch (err: any) {
+      // 捕捉网络层面的报错，通常是 CORS
       if (err.name === 'TypeError' && err.message === 'Failed to fetch') {
-        throw new Error("网络错误：浏览器 CORS 限制。请务必在设置中部署并使用 Cloudflare Worker 代理。");
+        throw new Error("连接后端失败。请确保你的 Worker 代码已更新到最新版（处理了 OPTIONS 请求），且 URL 正确。");
       }
       throw err;
     }

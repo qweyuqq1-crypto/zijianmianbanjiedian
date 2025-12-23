@@ -5,7 +5,7 @@ import {
   CheckCircle2, Copy, RefreshCw, Trophy, 
   XCircle, Save, Cloud, BrainCircuit, Trash2, MapPin, Loader2,
   Server, Cpu, ArrowUpRight, HelpCircle, ToggleLeft, ToggleRight,
-  AlertCircle, ExternalLink, Code2, Terminal, Info
+  AlertCircle, ExternalLink, Code2, Terminal, Info, Link2, Wifi, WifiOff
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { MOCK_NODES } from './constants';
@@ -18,28 +18,45 @@ import { cloudflareApi } from './services/cloudflareService';
 
 type ViewType = 'dashboard' | 'network' | 'lab' | 'settings';
 
+// 增强版 Worker 代码：完善了对 OPTIONS 预检请求的处理，彻底解决 CORS 报错
 const WORKER_PROXY_CODE = `
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const targetUrl = url.search.slice(1); 
-    if (!targetUrl) return new Response("Missing Target URL", { status: 400 });
     
+    // 1. 处理浏览器的 CORS 预检请求 (OPTIONS)
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
+          "Access-Control-Max-Age": "86400",
+        }
+      });
+    }
+
+    if (!targetUrl) return new Response("CloudVista Proxy is Running! Missing Target URL in query string.", { status: 200 });
+    
+    // 2. 构造转发请求
     const newRequest = new Request(targetUrl, {
       method: request.method,
       headers: request.headers,
-      body: request.body
+      body: request.method === 'GET' || request.method === 'HEAD' ? null : await request.arrayBuffer()
     });
 
     try {
       const response = await fetch(newRequest);
       const newResponse = new Response(response.body, response);
+      // 3. 注入跨域头，允许前端读取结果
       newResponse.headers.set("Access-Control-Allow-Origin", "*");
-      newResponse.headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-      newResponse.headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
       return newResponse;
     } catch (e) {
-      return new Response("Proxy Error: " + e.message, { status: 500 });
+      return new Response("Proxy Error: " + e.message, { 
+        status: 500,
+        headers: { "Access-Control-Allow-Origin": "*" }
+      });
     }
   }
 };`;
@@ -54,7 +71,6 @@ const App: React.FC = () => {
   const [selectedNode, setSelectedNode] = useState<CFNode | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
-  // 强化配置加载，支持从系统变量直接读取 Proxy URL
   const [cfConfig, setCfConfig] = useState<CFConfig>(() => {
     const saved = localStorage.getItem('cv_config');
     const envDefaults = {
@@ -78,6 +94,22 @@ const App: React.FC = () => {
     }
     return envDefaults;
   });
+
+  const [proxyStatus, setProxyStatus] = useState<'idle' | 'checking' | 'online' | 'offline'>('idle');
+
+  const checkProxyStatus = async () => {
+    if (!cfConfig.proxyUrl) return;
+    setProxyStatus('checking');
+    try {
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(cfConfig.proxyUrl, { signal: controller.signal });
+      clearTimeout(id);
+      setProxyStatus(res.ok ? 'online' : 'offline');
+    } catch (e) {
+      setProxyStatus('offline');
+    }
+  };
 
   const generateConfigLink = (node: CFNode) => {
     const domain = cfConfig.domain || 'example.com';
@@ -112,7 +144,6 @@ const App: React.FC = () => {
   const handleConfirmDeploy = async () => {
     if (!newNodeData.id || !newNodeData.name) return alert("请完整填写子域名和名称");
     
-    // 实机部署必须检查代理
     if (!useSimulation && !cfConfig.proxyUrl) {
       setDeployLogs(["[ERROR] 未设置代理 URL！", "浏览器无法直接连接 CF API，请在[系统配置]中部署并填写 Worker 代理地址。"]);
       return;
@@ -140,7 +171,7 @@ const App: React.FC = () => {
         type: 'A'
       };
 
-      setDeployLogs(prev => [...prev, `[WAIT] 正在发送 API 请求至 ${useSimulation ? '本地' : 'Cloudflare'}...`]);
+      setDeployLogs(prev => [...prev, `[WAIT] 正在发送 API 请求至 ${useSimulation ? '本地模拟' : 'Cloudflare'}...`]);
       await cloudflareApi.createDnsRecord(cfConfig, newNode, useSimulation);
       
       setDeployLogs(prev => [...prev, "[SUCCESS] 解析已生效，节点已添加至管理列表！"]);
@@ -160,7 +191,7 @@ const App: React.FC = () => {
 
   const copyWorkerCode = () => {
     navigator.clipboard.writeText(WORKER_PROXY_CODE);
-    alert("Worker 代码已复制！请前往 Cloudflare Workers 部署，完成后将生成的网址填入下方的【私有代理 URL】");
+    alert("最新的 Worker 代码已复制！请前往 Cloudflare 覆盖旧代码并重新部署。");
   };
 
   const renderContentView = () => {
@@ -318,19 +349,26 @@ const App: React.FC = () => {
                 <div className="p-4 bg-indigo-900/40 rounded-2xl border border-indigo-500/30 mb-6 flex gap-3">
                    <Info size={18} className="text-indigo-300 shrink-0 mt-1" />
                    <p className="text-xs text-slate-300 leading-relaxed">
-                     <b>为什么需要后端?</b> 浏览器禁止直接调用 Cloudflare API。你需要部署下面的 Worker 源码，并将生成的 URL 填入下方，才能解决你遇到的“CORS 错误”。
+                     <b>为什么需要后端?</b> 浏览器禁止直接调用 Cloudflare API。你需要部署下面的 Worker 源码，并将生成的 URL 填入下方。
                    </p>
                 </div>
                 <div className="mb-6">
                    <div className="flex justify-between items-center mb-2">
                      <label className="text-[10px] font-black text-slate-500 uppercase block">私有代理 URL</label>
-                     {process.env.CF_PROXY_URL && <span className="text-[9px] font-bold bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full">已从环境加载</span>}
+                     <div className="flex items-center gap-2">
+                        {proxyStatus === 'online' && <span className="text-[9px] font-bold text-emerald-400 flex items-center gap-1"><Wifi size={10} /> 状态正常</span>}
+                        {proxyStatus === 'offline' && <span className="text-[9px] font-bold text-rose-400 flex items-center gap-1"><WifiOff size={10} /> 连接失败</span>}
+                        <button onClick={checkProxyStatus} className="text-[9px] font-bold text-indigo-300 hover:text-white underline">点击测试</button>
+                     </div>
                    </div>
-                   <input type="text" value={cfConfig.proxyUrl} onChange={e => setCfConfig({...cfConfig, proxyUrl: e.target.value})} className="w-full bg-slate-800 border border-slate-700 p-4 rounded-2xl text-sm font-mono outline-none text-indigo-400 focus:border-indigo-500 transition-all" placeholder="https://your-worker.workers.dev" />
+                   <input type="text" value={cfConfig.proxyUrl} onChange={e => { setCfConfig({...cfConfig, proxyUrl: e.target.value}); setProxyStatus('idle'); }} className="w-full bg-slate-800 border border-slate-700 p-4 rounded-2xl text-sm font-mono outline-none text-indigo-400 focus:border-indigo-500 transition-all" placeholder="https://your-worker.workers.dev" />
                 </div>
-                <button onClick={copyWorkerCode} className="w-full py-4 bg-white/10 hover:bg-white/20 rounded-2xl font-bold flex items-center justify-center gap-2 border border-white/10 transition-all text-sm">
-                   <Code2 size={18} /> 复制代理 Worker 源码 (后端)
+                <button onClick={copyWorkerCode} className="w-full py-4 bg-white/10 hover:bg-white/20 rounded-2xl font-bold flex items-center justify-center gap-2 border border-white/10 transition-all text-sm mb-4">
+                   <Code2 size={18} /> 复制最新源码 (后端)
                 </button>
+                <div className="text-[10px] text-slate-500 text-center flex items-center justify-center gap-2">
+                   <Info size={12} /> 提示：如果更新了 URL，请务必点击“保存配置”
+                </div>
               </div>
             </div>
           </div>
@@ -349,11 +387,11 @@ const App: React.FC = () => {
           {sidebarOpen && <h1 className="text-xl font-black text-slate-800">CloudVista</h1>}
         </div>
         <nav className="flex-1 px-4 space-y-2">
-          <NavItem icon={<LayoutDashboard size={20} />} label="控制中心" active={activeView === 'dashboard'} onClick={() => setActiveView('dashboard')} sidebarOpen={sidebarOpen} />
-          <NavItem icon={<Globe size={20} />} label="边缘解析" active={activeView === 'network'} onClick={() => setActiveView('network')} sidebarOpen={sidebarOpen} />
-          <NavItem icon={<FlaskConical size={20} />} label="优选实验室" active={activeView === 'lab'} onClick={() => setActiveView('lab')} sidebarOpen={sidebarOpen} />
+          <NavItem icon={<LayoutDashboard size={20} />} label="控制中心" active={activeView === 'dashboard'} onClick={() => setActiveView('dashboard'} sidebarOpen={sidebarOpen} />
+          <NavItem icon={<Globe size={20} />} label="边缘解析" active={activeView === 'network'} onClick={() => setActiveView('network'} sidebarOpen={sidebarOpen} />
+          <NavItem icon={<FlaskConical size={20} />} label="优选实验室" active={activeView === 'lab'} onClick={() => setActiveView('lab'} sidebarOpen={sidebarOpen} />
           <div className="pt-4 border-t border-slate-50">
-            <NavItem icon={<Settings size={20} />} label="系统配置" active={activeView === 'settings'} onClick={() => setActiveView('settings')} sidebarOpen={sidebarOpen} />
+            <NavItem icon={<Settings size={20} />} label="系统配置" active={activeView === 'settings'} onClick={() => setActiveView('settings'} sidebarOpen={sidebarOpen} />
           </div>
         </nav>
       </aside>
